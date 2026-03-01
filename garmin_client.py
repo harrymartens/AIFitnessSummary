@@ -104,12 +104,12 @@ class GarminClient:
             if data.get("totalSteps") is not None:
                 steps_list.append(data["totalSteps"])
             if data.get("activeKilocalories") is not None:
-                active_list.append(data.get("moderateIntensityMinutes", 0) +
-                                   data.get("vigorousIntensityMinutes", 0) * 2)
+                active_list.append((data.get("moderateIntensityMinutes") or 0) +
+                                   (data.get("vigorousIntensityMinutes") or 0) * 2)
             if data.get("moderateIntensityMinutes") is not None:
                 intensity_list.append(
-                    data.get("moderateIntensityMinutes", 0) +
-                    data.get("vigorousIntensityMinutes", 0)
+                    (data.get("moderateIntensityMinutes") or 0) +
+                    (data.get("vigorousIntensityMinutes") or 0)
                 )
 
         return {
@@ -147,11 +147,11 @@ class GarminClient:
             summary = data.get("dailySleepDTO") or {}
             if not summary:
                 continue
-            total_sec = summary.get("sleepTimeSeconds", 0)
-            deep_sec = summary.get("deepSleepSeconds", 0)
-            rem_sec = summary.get("remSleepSeconds", 0)
-            light_sec = summary.get("lightSleepSeconds", 0)
-            awake_sec = summary.get("awakeSleepSeconds", 0)
+            total_sec = summary.get("sleepTimeSeconds") or 0
+            deep_sec = summary.get("deepSleepSeconds") or 0
+            rem_sec = summary.get("remSleepSeconds") or 0
+            light_sec = summary.get("lightSleepSeconds") or 0
+            awake_sec = summary.get("awakeSleepSeconds") or 0
             nightly.append({
                 "date": day.strftime(DATE_FORMAT),
                 "total_h": round(total_sec / 3600, 2),
