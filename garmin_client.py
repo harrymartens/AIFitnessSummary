@@ -95,8 +95,9 @@ class GarminClient:
     # ------------------------------------------------------------------
 
     def fetch_stats(self, start: datetime.date, end: datetime.date) -> dict:
-        """Average daily steps and active/intensity minutes over the period."""
+        """Average daily steps, active/intensity minutes, calories, floors, distance."""
         steps_list, active_list, intensity_list = [], [], []
+        calories_list, floors_list, distance_list = [], [], []
         for day in _date_range(start, end):
             data = _safe_get(self._client.get_stats, day.strftime(DATE_FORMAT))
             if not data:
@@ -111,11 +112,20 @@ class GarminClient:
                     (data.get("moderateIntensityMinutes") or 0) +
                     (data.get("vigorousIntensityMinutes") or 0)
                 )
+            if data.get("totalKilocalories") is not None:
+                calories_list.append(data["totalKilocalories"])
+            if data.get("floorsAscended") is not None:
+                floors_list.append(data["floorsAscended"])
+            if data.get("totalDistanceMeters") is not None:
+                distance_list.append(data["totalDistanceMeters"])
 
         return {
             "avg_daily_steps": int(sum(steps_list) / len(steps_list)) if steps_list else None,
             "avg_active_minutes": int(sum(active_list) / len(active_list)) if active_list else None,
             "avg_intensity_minutes": int(sum(intensity_list) / len(intensity_list)) if intensity_list else None,
+            "avg_total_calories": int(sum(calories_list) / len(calories_list)) if calories_list else None,
+            "avg_floors": round(sum(floors_list) / len(floors_list), 1) if floors_list else None,
+            "avg_distance_km": round(sum(distance_list) / len(distance_list) / 1000, 2) if distance_list else None,
             "days_with_data": len(steps_list),
         }
 
@@ -263,6 +273,118 @@ class GarminClient:
         avg_load = round(sum(load_vals) / len(load_vals), 1) if load_vals else None
         return {"daily": daily, "avg_load": avg_load, "latest_status": latest_status}
 
+    def fetch_spo2(self, start: datetime.date, end: datetime.date) -> dict:
+        """Average SpO2 (blood oxygen saturation) over the period."""
+        daily = []
+        for day in _date_range(start, end):
+            data = _safe_get(self._client.get_spo2_data, day.strftime(DATE_FORMAT))
+            if not data:
+                continue
+            avg = data.get("averageSpO2") or data.get("avgSpO2")
+            lowest = data.get("lowestSpO2") or data.get("minSpO2")
+            if avg:
+                daily.append({"date": day.strftime(DATE_FORMAT), "avg_spo2": avg, "lowest_spo2": lowest})
+
+        avg_vals = [d["avg_spo2"] for d in daily if d["avg_spo2"] is not None]
+        low_vals = [d["lowest_spo2"] for d in daily if d.get("lowest_spo2") is not None]
+        return {
+            "daily": daily,
+            "avg_spo2": round(sum(avg_vals) / len(avg_vals), 1) if avg_vals else None,
+            "avg_lowest_spo2": round(sum(low_vals) / len(low_vals), 1) if low_vals else None,
+        }
+
+    def fetch_respiration(self, start: datetime.date, end: datetime.date) -> dict:
+        """Average breathing rate (breaths/min) over the period."""
+        daily = []
+        for day in _date_range(start, end):
+            data = _safe_get(self._client.get_respiration_data, day.strftime(DATE_FORMAT))
+            if not data:
+                continue
+            waking = data.get("avgWakingRespirationValue") or data.get("startingRespirationValue")
+            sleeping = data.get("avgSleepRespirationValue")
+            if waking:
+                daily.append({"date": day.strftime(DATE_FORMAT), "waking_brpm": waking, "sleep_brpm": sleeping})
+
+        waking_vals = [d["waking_brpm"] for d in daily if d["waking_brpm"] is not None]
+        sleep_vals = [d["sleep_brpm"] for d in daily if d.get("sleep_brpm") is not None]
+        return {
+            "daily": daily,
+            "avg_waking_brpm": round(sum(waking_vals) / len(waking_vals), 1) if waking_vals else None,
+            "avg_sleep_brpm": round(sum(sleep_vals) / len(sleep_vals), 1) if sleep_vals else None,
+        }
+
+    def fetch_training_readiness(self, start: datetime.date, end: datetime.date) -> dict:
+        """Daily training readiness scores."""
+        daily = []
+        for day in _date_range(start, end):
+            data = _safe_get(self._client.get_training_readiness, day.strftime(DATE_FORMAT))
+            if not data:
+                continue
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            score = data.get("score")
+            level = data.get("level") or data.get("feedbackShort")
+            if score is not None:
+                daily.append({"date": day.strftime(DATE_FORMAT), "score": score, "level": level})
+
+        scores = [d["score"] for d in daily if d["score"] is not None]
+        return {
+            "daily": daily,
+            "avg_score": round(sum(scores) / len(scores), 1) if scores else None,
+            "latest_score": daily[-1]["score"] if daily else None,
+            "latest_level": daily[-1].get("level") if daily else None,
+        }
+
+    def fetch_vo2max(self, end: datetime.date) -> dict:
+        """Latest VO2 max and fitness age (fetched for the end date)."""
+        data = _safe_get(self._client.get_max_metrics, end.strftime(DATE_FORMAT))
+        if not data:
+            return {"vo2_max": None, "fitness_age": None}
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        # Field may be nested under a key like "generic"
+        generic = data.get("generic") or data
+        return {
+            "vo2_max": generic.get("vo2MaxPreciseValue") or generic.get("vo2Max"),
+            "fitness_age": generic.get("fitnessAge"),
+        }
+
+    def fetch_body_composition(self, start: datetime.date, end: datetime.date) -> dict:
+        """Weight and body composition data for the period."""
+        data = _safe_get(
+            self._client.get_body_composition,
+            start.strftime(DATE_FORMAT),
+            end.strftime(DATE_FORMAT),
+        )
+        if not data:
+            return {"entries": [], "latest_weight_kg": None, "avg_weight_kg": None}
+
+        raw = data if isinstance(data, list) else (
+            data.get("dateWeightList") or data.get("bodyCompositionList") or []
+        )
+        entries = []
+        for entry in raw:
+            weight_g = entry.get("weight")
+            if not weight_g:
+                continue
+            entries.append({
+                "date": entry.get("calendarDate") or entry.get("date", ""),
+                "weight_kg": round(weight_g / 1000, 1),
+                "bmi": entry.get("bmi"),
+                "body_fat_pct": entry.get("bodyFatPercentage"),
+                "muscle_mass_kg": entry.get("muscleMass"),
+            })
+
+        entries.sort(key=lambda e: e["date"])
+        weights = [e["weight_kg"] for e in entries]
+        return {
+            "entries": entries,
+            "latest_weight_kg": entries[-1]["weight_kg"] if entries else None,
+            "avg_weight_kg": round(sum(weights) / len(weights), 1) if weights else None,
+            "latest_bmi": entries[-1].get("bmi") if entries else None,
+            "latest_body_fat_pct": entries[-1].get("body_fat_pct") if entries else None,
+        }
+
     def fetch_runs(self, start: datetime.date, end: datetime.date) -> dict:
         """Running activities over the period."""
         data = _safe_get(
@@ -316,4 +438,9 @@ class GarminClient:
             "hrv": self.fetch_hrv(start, end),
             "training_load": self.fetch_training_load(start, end),
             "runs": self.fetch_runs(start, end),
+            "spo2": self.fetch_spo2(start, end),
+            "respiration": self.fetch_respiration(start, end),
+            "training_readiness": self.fetch_training_readiness(start, end),
+            "vo2max": self.fetch_vo2max(end),
+            "body_composition": self.fetch_body_composition(start, end),
         }

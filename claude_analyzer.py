@@ -41,8 +41,11 @@ def _format_data_for_prompt(
         "",
         "-- Activity --",
         f"Average daily steps: {garmin['stats'].get('avg_daily_steps')}",
+        f"Average daily distance: {garmin['stats'].get('avg_distance_km')} km",
         f"Average daily active minutes: {garmin['stats'].get('avg_active_minutes')}",
         f"Average intensity minutes: {garmin['stats'].get('avg_intensity_minutes')}",
+        f"Average floors climbed/day: {garmin['stats'].get('avg_floors')}",
+        f"Average total calories/day: {garmin['stats'].get('avg_total_calories')} kcal",
         "",
         "-- Cardiovascular --",
         f"Average resting heart rate: {garmin['heart_rate'].get('avg_resting_hr')} bpm",
@@ -60,6 +63,22 @@ def _format_data_for_prompt(
     for entry in garmin["hrv"].get("daily", []):
         lines.append(f"  {entry['date']}: {entry.get('status', 'n/a')} (last night avg: {entry.get('last_night_avg_ms')} ms)")
 
+    spo2 = garmin.get("spo2", {})
+    resp = garmin.get("respiration", {})
+    vo2 = garmin.get("vo2max", {})
+    lines += [
+        "",
+        "-- Blood Oxygen & Respiration --",
+        f"Average SpO2: {spo2.get('avg_spo2')} %",
+        f"Average lowest nightly SpO2: {spo2.get('avg_lowest_spo2')} %",
+        f"Average waking respiration rate: {resp.get('avg_waking_brpm')} brpm",
+        f"Average sleep respiration rate: {resp.get('avg_sleep_brpm')} brpm",
+        "",
+        "-- VO2 Max & Fitness Age --",
+        f"VO2 max: {vo2.get('vo2_max')} ml/kg/min",
+        f"Fitness age: {vo2.get('fitness_age')} yrs",
+    ]
+
     lines += [
         "",
         "-- Sleep --",
@@ -68,6 +87,7 @@ def _format_data_for_prompt(
         f"Average REM sleep: {garmin['sleep'].get('avg_rem_h')} h",
         f"Average light sleep: {garmin['sleep'].get('avg_light_h')} h",
         f"Average awake time: {garmin['sleep'].get('avg_awake_h')} h",
+        f"Nights tracked: {len(garmin['sleep'].get('nightly', []))}",
         "Nightly breakdown:",
     ]
     for night in garmin["sleep"].get("nightly", []):
@@ -76,13 +96,24 @@ def _format_data_for_prompt(
             f"REM {night['rem_h']}h | light {night['light_h']}h | awake {night['awake_h']}h"
         )
 
+    readiness = garmin.get("training_readiness", {})
     lines += [
         "",
-        "-- Stress & Body Battery --",
+        "-- Stress, Recovery & Body Battery --",
         f"Average stress level: {garmin['stress'].get('avg_stress')} (0–100 scale)",
+        "Daily stress (date: score):",
+    ]
+    for entry in garmin["stress"].get("daily", []):
+        lines.append(f"  {entry['date']}: {entry['avg_stress']}")
+    lines += [
         f"Average body battery max (charged): {garmin['body_battery'].get('avg_max')}",
         f"Average body battery drain: {garmin['body_battery'].get('avg_min')}",
+        f"Average training readiness score: {readiness.get('avg_score')} / 100",
+        f"Latest training readiness: {readiness.get('latest_score')} ({readiness.get('latest_level')})",
+        "Daily training readiness (date: score / level):",
     ]
+    for entry in readiness.get("daily", []):
+        lines.append(f"  {entry['date']}: {entry['score']} / {entry.get('level', 'n/a')}")
 
     lines += [
         "",
@@ -90,6 +121,33 @@ def _format_data_for_prompt(
         f"Average training load: {garmin['training_load'].get('avg_load')}",
         f"Latest training status: {garmin['training_load'].get('latest_status')}",
     ]
+
+    body = garmin.get("body_composition", {})
+    if body.get("latest_weight_kg"):
+        lines += [
+            "",
+            "-- Body Composition --",
+            f"Latest weight: {body.get('latest_weight_kg')} kg",
+            f"Average weight: {body.get('avg_weight_kg')} kg",
+            f"Latest BMI: {body.get('latest_bmi')}",
+            f"Latest body fat: {body.get('latest_body_fat_pct')} %",
+        ]
+
+    runs = garmin.get("runs", {})
+    if runs.get("run_count"):
+        lines += [
+            "",
+            "-- Running --",
+            f"Runs completed: {runs['run_count']}",
+            f"Total distance: {runs['total_distance_km']} km",
+            f"Average pace: {runs.get('avg_pace_min_km')} min/km",
+            "Individual runs (date: distance km, pace min/km, avg HR):",
+        ]
+        for r in runs.get("runs", []):
+            lines.append(
+                f"  {r['date']}: {r['distance_km']} km @ {r.get('avg_pace_min_km')} min/km"
+                + (f", HR {r['avg_hr']} bpm" if r.get("avg_hr") else "")
+            )
 
     lines += [
         "",

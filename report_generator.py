@@ -80,13 +80,23 @@ class ReportGenerator:
         sections.append(self._section_activity(garmin["stats"]))
 
         # Cardiovascular Health
-        sections.append(self._section_cardio(garmin["heart_rate"], garmin["hrv"]))
+        sections.append(self._section_cardio(
+            garmin["heart_rate"], garmin["hrv"],
+            garmin.get("spo2", {}), garmin.get("respiration", {}), garmin.get("vo2max", {}),
+        ))
 
         # Sleep Analysis
         sections.append(self._section_sleep(garmin["sleep"]))
 
         # Recovery & Stress
-        sections.append(self._section_recovery(garmin["stress"], garmin["body_battery"]))
+        sections.append(self._section_recovery(
+            garmin["stress"], garmin["body_battery"], garmin.get("training_readiness", {})
+        ))
+
+        # Body Metrics (only if data available)
+        body_section = self._section_body(garmin.get("body_composition", {}))
+        if body_section:
+            sections.append(body_section)
 
         # Strength Training (Hevy)
         sections.append(self._section_strength(hevy))
@@ -147,23 +157,31 @@ class ReportGenerator:
     def _section_activity(self, stats: dict) -> str:
         rows = [
             ["Average daily steps", _fmt(stats.get("avg_daily_steps"), "steps")],
+            ["Average daily distance", _fmt(stats.get("avg_distance_km"), "km")],
             ["Average active minutes/day", _fmt(stats.get("avg_active_minutes"), "min")],
             ["Average intensity minutes/day", _fmt(stats.get("avg_intensity_minutes"), "min")],
+            ["Average floors climbed/day", _fmt(stats.get("avg_floors"), "floors")],
+            ["Average total calories/day", _fmt(stats.get("avg_total_calories"), "kcal")],
             ["Days with data", str(stats.get("days_with_data", "—"))],
         ]
         return _h(2, "Activity Overview") + "\n\n" + _table(["Metric", "Value"], rows)
 
-    def _section_cardio(self, hr: dict, hrv: dict) -> str:
+    def _section_cardio(self, hr: dict, hrv: dict, spo2: dict, respiration: dict, vo2max: dict) -> str:
         lines = [_h(2, "Cardiovascular Health"), ""]
 
         rows = [
             ["Average resting heart rate", _fmt(hr.get("avg_resting_hr"), "bpm")],
             ["Period HRV average", _fmt(hrv.get("period_avg_ms"), "ms")],
+            ["Average SpO2", _fmt(spo2.get("avg_spo2"), "%")],
+            ["Average lowest SpO2", _fmt(spo2.get("avg_lowest_spo2"), "%")],
+            ["Avg waking respiration", _fmt(respiration.get("avg_waking_brpm"), "brpm")],
+            ["Avg sleep respiration", _fmt(respiration.get("avg_sleep_brpm"), "brpm")],
+            ["VO2 max", _fmt(vo2max.get("vo2_max"), "ml/kg/min")],
+            ["Fitness age", _fmt(vo2max.get("fitness_age"), "yrs")],
         ]
         lines.append(_table(["Metric", "Value"], rows))
         lines.append("")
 
-        # Resting HR trend table (kept — not flagged by user)
         trend = hr.get("daily_trend", [])
         if trend:
             lines.append(_h(3, "Resting HR Daily Trend"))
@@ -187,15 +205,29 @@ class ReportGenerator:
         lines.append(_table(["Metric", "Average"], averages))
         return "\n".join(lines)
 
-    def _section_recovery(self, stress: dict, battery: dict) -> str:
+    def _section_recovery(self, stress: dict, battery: dict, readiness: dict) -> str:
         lines = [_h(2, "Recovery & Stress"), ""]
         summary = [
             ["Average stress level", _fmt(stress.get("avg_stress"), "/100")],
             ["Avg body battery charged", _fmt(battery.get("avg_max"), "pts")],
             ["Avg body battery drained", _fmt(battery.get("avg_min"), "pts")],
+            ["Avg training readiness", _fmt(readiness.get("avg_score"), "/100")],
+            ["Latest readiness score", _fmt(readiness.get("latest_score"), "")],
+            ["Latest readiness level", readiness.get("latest_level") or "—"],
         ]
         lines.append(_table(["Metric", "Value"], summary))
         return "\n".join(lines)
+
+    def _section_body(self, body: dict) -> str | None:
+        if not body.get("latest_weight_kg"):
+            return None
+        rows = [
+            ["Latest weight", _fmt(body.get("latest_weight_kg"), "kg")],
+            ["Average weight", _fmt(body.get("avg_weight_kg"), "kg")],
+            ["BMI", _fmt(body.get("latest_bmi"), "")],
+            ["Body fat %", _fmt(body.get("latest_body_fat_pct"), "%")],
+        ]
+        return _h(2, "Body Metrics") + "\n\n" + _table(["Metric", "Value"], rows)
 
     def _section_strength(self, hevy: dict) -> str:
         lines = [_h(2, "Strength Training (Hevy)"), ""]
