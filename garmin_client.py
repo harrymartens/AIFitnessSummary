@@ -141,7 +141,7 @@ class GarminClient:
         """Per-night sleep breakdown (total, deep, REM, light, awake) and averages."""
         nightly = []
         for day in _date_range(start, end):
-            data = _safe_get(self._client.get_sleep, day.strftime(DATE_FORMAT))
+            data = _safe_get(self._client.get_sleep_data, day.strftime(DATE_FORMAT))
             if not data:
                 continue
             summary = data.get("dailySleepDTO") or {}
