@@ -210,10 +210,10 @@ class GarminClient:
             if date:
                 daily.append({"date": date, "charged": charged, "drained": drained})
 
-        avg_max = round(sum(d["charged"] for d in daily if d["charged"] is not None) /
-                        max(len([d for d in daily if d["charged"] is not None]), 1), 1)
-        avg_min = round(sum(d["drained"] for d in daily if d["drained"] is not None) /
-                        max(len([d for d in daily if d["drained"] is not None]), 1), 1)
+        charged_vals = [d["charged"] for d in daily if d["charged"] is not None]
+        drained_vals = [d["drained"] for d in daily if d["drained"] is not None]
+        avg_max = round(sum(charged_vals) / len(charged_vals), 1) if charged_vals else None
+        avg_min = round(sum(drained_vals) / len(drained_vals), 1) if drained_vals else None
         return {"daily": daily, "avg_max": avg_max, "avg_min": avg_min}
 
     def fetch_hrv(self, start: datetime.date, end: datetime.date) -> dict:
@@ -259,10 +259,8 @@ class GarminClient:
                 })
 
         latest_status = daily[-1]["status"] if daily else None
-        avg_load = round(
-            sum(d["training_load"] for d in daily if d["training_load"] is not None) /
-            max(len([d for d in daily if d["training_load"] is not None]), 1), 1
-        )
+        load_vals = [d["training_load"] for d in daily if d["training_load"] is not None]
+        avg_load = round(sum(load_vals) / len(load_vals), 1) if load_vals else None
         return {"daily": daily, "avg_load": avg_load, "latest_status": latest_status}
 
     def fetch_runs(self, start: datetime.date, end: datetime.date) -> dict:
