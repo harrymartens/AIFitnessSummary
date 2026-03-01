@@ -1,0 +1,5 @@
+garminconnect>=0.2.38
+anthropic>=0.84.0
+requests>=2.32.5
+python-dotenv>=1.0.0
+schedule>=1.2.0
