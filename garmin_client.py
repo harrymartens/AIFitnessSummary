@@ -49,33 +49,41 @@ class GarminClient:
     def _login(email: str, password: str) -> Garmin:
         """Authenticate with Garmin Connect.
 
-        Tries loading cached OAuth tokens from TOKENSTORE first so that
-        cron runs and repeated invocations don't need to re-authenticate.
-        Falls back to a full credential login (which supports interactive
-        2FA prompts via garth's built-in input() handler) and saves the
-        resulting tokens for next time.
+        Tries loading cached OAuth tokens from TOKENSTORE first — this is
+        what all cron/automated runs use after the initial setup.
+
+        On first run (or after token expiry ~1 year), falls back to a full
+        credential + MFA login using return_on_mfa=True so the 6-digit code
+        is explicitly prompted and fed to resume_login(). Tokens are then
+        saved and future runs are fully non-interactive.
         """
-        # --- Attempt 1: load saved tokens ---
+        # --- Attempt 1: load saved tokens (no credentials or MFA needed) ---
         try:
             client = Garmin()
             client.login(TOKENSTORE)
             print("Loaded Garmin session from saved tokens.")
             return client
         except Exception:
-            pass  # no tokens yet, or they expired — fall through to fresh login
+            pass  # no tokens yet or expired — fall through to fresh login
 
-        # --- Attempt 2: full OAuth login with credentials ---
-        # garth will call input() for a 2FA code if Garmin requires it,
-        # so run this interactively at least once to seed the token cache.
-        print("No saved Garmin session found. Logging in with credentials…")
-        print("(If Garmin requires 2FA you will be prompted for a code now.)")
+        # --- Attempt 2: full credential + MFA login ---
+        print("No saved Garmin session found. Starting first-time login…")
+        print(
+            "Garmin will email you a 6-digit verification code.\n"
+            "You only need to do this once — tokens are saved for ~1 year."
+        )
         try:
-            client = Garmin(email=email, password=password)
-            client.login()
-            # Persist tokens so future runs (including cron) work without 2FA
-            Path(TOKENSTORE).mkdir(mode=0o700, exist_ok=True)
-            client.garth.dump(TOKENSTORE)
-            print(f"Session saved to {TOKENSTORE}. Future runs will skip this step.")
+            client = Garmin(email=email, password=password, is_cn=False, return_on_mfa=True)
+            result, mfa_data = client.login()
+            if result == "needs_mfa":
+                mfa_code = input("Enter the 6-digit code from your Garmin email: ").strip()
+                client.resume_login(mfa_data, mfa_code)
+
+            # Persist tokens — cron jobs and all future runs will use these
+            tokenstore_path = Path(TOKENSTORE)
+            tokenstore_path.mkdir(mode=0o700, exist_ok=True)
+            client.garth.dump(str(tokenstore_path))
+            print(f"Session saved to {TOKENSTORE}. No code needed again for ~1 year.")
             return client
         except GarminConnectAuthenticationError as exc:
             raise RuntimeError(
