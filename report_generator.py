@@ -156,28 +156,20 @@ class ReportGenerator:
     def _section_cardio(self, hr: dict, hrv: dict) -> str:
         lines = [_h(2, "Cardiovascular Health"), ""]
 
-        # Resting HR summary
-        lines.append(f"**Average resting heart rate:** {_fmt(hr.get('avg_resting_hr'), 'bpm')}")
-        lines.append(f"**Period HRV average:** {_fmt(hrv.get('period_avg_ms'), 'ms')}")
+        rows = [
+            ["Average resting heart rate", _fmt(hr.get("avg_resting_hr"), "bpm")],
+            ["Period HRV average", _fmt(hrv.get("period_avg_ms"), "ms")],
+        ]
+        lines.append(_table(["Metric", "Value"], rows))
         lines.append("")
 
-        # HR trend table
+        # Resting HR trend table (kept — not flagged by user)
         trend = hr.get("daily_trend", [])
         if trend:
             lines.append(_h(3, "Resting HR Daily Trend"))
             lines.append(_table(
                 ["Date", "Resting HR (bpm)"],
                 [[e["date"], e["resting_hr"]] for e in trend]
-            ))
-            lines.append("")
-
-        # HRV table
-        hrv_daily = hrv.get("daily", [])
-        if hrv_daily:
-            lines.append(_h(3, "HRV Daily Status"))
-            lines.append(_table(
-                ["Date", "Status", "Last Night Avg (ms)"],
-                [[e["date"], e.get("status", "—"), e.get("last_night_avg_ms", "—")] for e in hrv_daily]
             ))
 
         return "\n".join(lines)
@@ -190,18 +182,9 @@ class ReportGenerator:
             ["Average REM sleep", _fmt(sleep.get("avg_rem_h"), "h")],
             ["Average light sleep", _fmt(sleep.get("avg_light_h"), "h")],
             ["Average awake time", _fmt(sleep.get("avg_awake_h"), "h")],
+            ["Nights tracked", str(len(sleep.get("nightly", [])))],
         ]
         lines.append(_table(["Metric", "Average"], averages))
-        lines.append("")
-
-        nightly = sleep.get("nightly", [])
-        if nightly:
-            lines.append(_h(3, "Nightly Breakdown"))
-            lines.append(_table(
-                ["Date", "Total (h)", "Deep (h)", "REM (h)", "Light (h)", "Awake (h)"],
-                [[n["date"], n["total_h"], n["deep_h"], n["rem_h"], n["light_h"], n["awake_h"]]
-                 for n in nightly]
-            ))
         return "\n".join(lines)
 
     def _section_recovery(self, stress: dict, battery: dict) -> str:
