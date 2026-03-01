@@ -24,8 +24,9 @@ class HevyClient:
 
     def fetch_workouts(self, start: datetime.date, end: datetime.date) -> list[dict]:
         """Return all workouts whose start_time falls within [start, end]."""
-        start_dt = datetime.datetime.combine(start, datetime.time.min)
-        end_dt = datetime.datetime.combine(end, datetime.time.max)
+        utc = datetime.timezone.utc
+        start_dt = datetime.datetime.combine(start, datetime.time.min, tzinfo=utc)
+        end_dt = datetime.datetime.combine(end, datetime.time.max, tzinfo=utc)
 
         workouts = []
         page = 1
@@ -38,9 +39,9 @@ class HevyClient:
             done = False
             for workout in batch:
                 raw_time = workout.get("start_time") or workout.get("created_at", "")
-                # Hevy returns ISO 8601 strings; parse with a lenient approach
+                # Hevy returns ISO 8601; normalise 'Z' → '+00:00' for fromisoformat
                 try:
-                    workout_dt = datetime.datetime.fromisoformat(raw_time.rstrip("Z"))
+                    workout_dt = datetime.datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
                 except (ValueError, AttributeError):
                     continue
 
@@ -78,7 +79,7 @@ class HevyClient:
         for workout in workouts:
             raw_time = workout.get("start_time") or workout.get("created_at", "")
             try:
-                dt = datetime.datetime.fromisoformat(raw_time.rstrip("Z"))
+                dt = datetime.datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
                 workout_dates.append(dt.strftime(DATE_FORMAT))
             except (ValueError, AttributeError):
                 pass
