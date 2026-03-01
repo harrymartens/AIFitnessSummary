@@ -195,15 +195,6 @@ class ReportGenerator:
             ["Avg body battery drained", _fmt(battery.get("avg_min"), "pts")],
         ]
         lines.append(_table(["Metric", "Value"], summary))
-        lines.append("")
-
-        daily = stress.get("daily", [])
-        if daily:
-            lines.append(_h(3, "Daily Stress Levels"))
-            lines.append(_table(
-                ["Date", "Avg Stress"],
-                [[d["date"], d["avg_stress"]] for d in daily]
-            ))
         return "\n".join(lines)
 
     def _section_strength(self, hevy: dict) -> str:
