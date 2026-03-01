@@ -1,6 +1,7 @@
 import datetime
 import os
 import time
+from pathlib import Path
 
 from garminconnect import (
     Garmin,
@@ -10,6 +11,9 @@ from garminconnect import (
 )
 
 from config import DATE_FORMAT
+
+# Garth saves OAuth tokens here so subsequent runs don't need credentials/2FA
+TOKENSTORE = os.path.expanduser("~/.garminconnect")
 
 
 def _date_range(start: datetime.date, end: datetime.date) -> list[datetime.date]:
@@ -39,11 +43,44 @@ class GarminClient:
     def __init__(self, email: str | None = None, password: str | None = None):
         email = email or os.environ["GARMIN_EMAIL"]
         password = password or os.environ["GARMIN_PASSWORD"]
-        self._client = Garmin(email, password)
+        self._client = self._login(email, password)
+
+    @staticmethod
+    def _login(email: str, password: str) -> Garmin:
+        """Authenticate with Garmin Connect.
+
+        Tries loading cached OAuth tokens from TOKENSTORE first so that
+        cron runs and repeated invocations don't need to re-authenticate.
+        Falls back to a full credential login (which supports interactive
+        2FA prompts via garth's built-in input() handler) and saves the
+        resulting tokens for next time.
+        """
+        # --- Attempt 1: load saved tokens ---
         try:
-            self._client.login()
+            client = Garmin()
+            client.login(TOKENSTORE)
+            print("Loaded Garmin session from saved tokens.")
+            return client
+        except Exception:
+            pass  # no tokens yet, or they expired — fall through to fresh login
+
+        # --- Attempt 2: full OAuth login with credentials ---
+        # garth will call input() for a 2FA code if Garmin requires it,
+        # so run this interactively at least once to seed the token cache.
+        print("No saved Garmin session found. Logging in with credentials…")
+        print("(If Garmin requires 2FA you will be prompted for a code now.)")
+        try:
+            client = Garmin(email=email, password=password)
+            client.login()
+            # Persist tokens so future runs (including cron) work without 2FA
+            Path(TOKENSTORE).mkdir(mode=0o700, exist_ok=True)
+            client.garth.dump(TOKENSTORE)
+            print(f"Session saved to {TOKENSTORE}. Future runs will skip this step.")
+            return client
         except GarminConnectAuthenticationError as exc:
-            raise RuntimeError("Garmin authentication failed. Check GARMIN_EMAIL and GARMIN_PASSWORD.") from exc
+            raise RuntimeError(
+                "Garmin authentication failed — check GARMIN_EMAIL and GARMIN_PASSWORD."
+            ) from exc
 
     # ------------------------------------------------------------------
     # Individual metric fetchers
