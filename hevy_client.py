@@ -6,7 +6,7 @@ import requests
 from config import DATE_FORMAT
 
 HEVY_BASE_URL = "https://api.hevyapp.com"
-PAGE_SIZE = 20
+PAGE_SIZE = 10  # Hevy API maximum
 
 
 class HevyClient:
