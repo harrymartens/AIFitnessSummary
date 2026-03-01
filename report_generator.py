@@ -91,6 +91,9 @@ class ReportGenerator:
         # Strength Training (Hevy)
         sections.append(self._section_strength(hevy))
 
+        # Running (Garmin)
+        sections.append(self._section_runs(garmin.get("runs", {})))
+
         # Training Load
         sections.append(self._section_training_load(garmin["training_load"]))
 
@@ -259,6 +262,33 @@ class ReportGenerator:
 
         return "\n".join(lines)
 
+    def _section_runs(self, runs: dict) -> str:
+        lines = [_h(2, "Running (Garmin)"), ""]
+        if not runs.get("run_count"):
+            lines.append("_No runs recorded this period._")
+            return "\n".join(lines)
+
+        summary = [
+            ["Runs completed", str(runs["run_count"])],
+            ["Total distance", _fmt(runs.get("total_distance_km"), "km")],
+            ["Average pace", _fmt_pace(runs.get("avg_pace_min_km"))],
+        ]
+        lines.append(_table(["Metric", "Value"], summary))
+        lines.append("")
+
+        individual = runs.get("runs", [])
+        if individual:
+            lines.append(_h(3, "Individual Runs"))
+            lines.append(_table(
+                ["Date", "Distance (km)", "Duration (min)", "Avg Pace (min/km)", "Avg HR"],
+                [
+                    [r["date"], r["distance_km"], r["duration_min"],
+                     _fmt_pace(r.get("avg_pace_min_km")), r.get("avg_hr") or "—"]
+                    for r in individual
+                ]
+            ))
+        return "\n".join(lines)
+
     def _section_training_load(self, load: dict) -> str:
         lines = [_h(2, "Training Load"), ""]
         lines.append(f"**Average training load:** {_fmt(load.get('avg_load'), '')}")
@@ -278,3 +308,12 @@ def _fmt(value, unit: str) -> str:
     if value is None:
         return "—"
     return f"{value} {unit}".strip()
+
+
+def _fmt_pace(value) -> str:
+    """Format a decimal minutes-per-km value as M:SS."""
+    if value is None:
+        return "—"
+    mins = int(value)
+    secs = round((value - mins) * 60)
+    return f"{mins}:{secs:02d} min/km"

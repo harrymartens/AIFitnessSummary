@@ -58,7 +58,33 @@ class HevyClient:
 
         return workouts
 
-    def summarise_workouts(self, workouts: list[dict], period_days: int = 7) -> dict:
+    def fetch_exercise_templates(self) -> dict[str, str]:
+        """Return a dict mapping exercise_template_id → primary muscle group name."""
+        templates: dict[str, str] = {}
+        page = 1
+        while True:
+            data = self._get("/v1/exercise_templates", params={"page": page, "pageSize": 100})
+            batch = data.get("exercise_templates", [])
+            if not batch:
+                break
+            for t in batch:
+                tid = t.get("id")
+                muscle = (
+                    t.get("primary_muscle_group")
+                    or t.get("muscle_group")
+                    or t.get("category")
+                )
+                if tid and muscle:
+                    templates[tid] = muscle
+            page += 1
+        return templates
+
+    def summarise_workouts(
+        self,
+        workouts: list[dict],
+        period_days: int = 7,
+        template_lookup: dict[str, str] | None = None,
+    ) -> dict:
         """Compute training summary from a list of Hevy workout objects."""
         if not workouts:
             return {
@@ -86,9 +112,11 @@ class HevyClient:
 
             for ex in workout.get("exercises", []):
                 title = ex.get("title") or ex.get("exercise_template_id", "Unknown")
+                template_id = ex.get("exercise_template_id")
                 muscle_group = (
-                    ex.get("muscle_group")
+                    (template_lookup.get(template_id) if template_lookup and template_id else None)
                     or ex.get("primary_muscle_group")
+                    or ex.get("muscle_group")
                     or ex.get("category")
                     or "Other"
                 )

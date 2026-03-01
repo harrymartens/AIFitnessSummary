@@ -148,6 +148,8 @@ class GarminClient:
             if not summary:
                 continue
             total_sec = summary.get("sleepTimeSeconds") or 0
+            if total_sec == 0:
+                continue  # night not tracked — exclude from averages and nightly breakdown
             deep_sec = summary.get("deepSleepSeconds") or 0
             rem_sec = summary.get("remSleepSeconds") or 0
             light_sec = summary.get("lightSleepSeconds") or 0
@@ -263,6 +265,43 @@ class GarminClient:
         )
         return {"daily": daily, "avg_load": avg_load, "latest_status": latest_status}
 
+    def fetch_runs(self, start: datetime.date, end: datetime.date) -> dict:
+        """Running activities over the period."""
+        data = _safe_get(
+            self._client.get_activities_by_date,
+            start.strftime(DATE_FORMAT),
+            end.strftime(DATE_FORMAT),
+            "running",
+        )
+        if not data:
+            return {"runs": [], "run_count": 0, "total_distance_km": 0.0, "avg_pace_min_km": None}
+
+        runs = []
+        for activity in data:
+            distance_m = activity.get("distance") or 0
+            duration_s = activity.get("duration") or 0
+            date = (activity.get("startTimeLocal") or "")[:10]
+
+            distance_km = round(distance_m / 1000, 2)
+            duration_min = round(duration_s / 60, 1)
+            pace = round(duration_min / distance_km, 2) if distance_km > 0 else None
+
+            runs.append({
+                "date": date,
+                "distance_km": distance_km,
+                "duration_min": duration_min,
+                "avg_pace_min_km": pace,
+                "avg_hr": activity.get("averageHR"),
+            })
+
+        paces = [r["avg_pace_min_km"] for r in runs if r["avg_pace_min_km"]]
+        return {
+            "runs": sorted(runs, key=lambda r: r["date"]),
+            "run_count": len(runs),
+            "total_distance_km": round(sum(r["distance_km"] for r in runs), 2),
+            "avg_pace_min_km": round(sum(paces) / len(paces), 2) if paces else None,
+        }
+
     # ------------------------------------------------------------------
     # Aggregator
     # ------------------------------------------------------------------
@@ -278,4 +317,5 @@ class GarminClient:
             "body_battery": self.fetch_body_battery(start, end),
             "hrv": self.fetch_hrv(start, end),
             "training_load": self.fetch_training_load(start, end),
+            "runs": self.fetch_runs(start, end),
         }

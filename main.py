@@ -39,7 +39,8 @@ def run(period: str) -> Path:
     period_days = (end - start).days + 1
     workouts = hevy.fetch_workouts(start, end)
     print(f"Fetched {len(workouts)} Hevy workouts.")
-    hevy_summary = hevy.summarise_workouts(workouts, period_days=period_days)
+    template_lookup = hevy.fetch_exercise_templates()
+    hevy_summary = hevy.summarise_workouts(workouts, period_days=period_days, template_lookup=template_lookup)
 
     # 3. Generate Claude narrative
     analyzer = ClaudeAnalyzer()
