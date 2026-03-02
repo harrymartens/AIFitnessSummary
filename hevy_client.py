@@ -63,7 +63,12 @@ class HevyClient:
         templates: dict[str, str] = {}
         page = 1
         while True:
-            data = self._get("/v1/exercise_templates", params={"page": page, "pageSize": 100})
+            try:
+                data = self._get("/v1/exercise_templates", params={"page": page, "pageSize": 100})
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 404:
+                    break  # past the last page
+                raise
             batch = data.get("exercise_templates", [])
             if not batch:
                 break
