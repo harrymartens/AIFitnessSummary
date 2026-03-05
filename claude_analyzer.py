@@ -1,4 +1,5 @@
 import json
+import re
 
 import anthropic
 
@@ -23,8 +24,52 @@ Structure your response with these exact Markdown headings (in this order):
 ## Recommendations for Next Period
 
 Keep the total response under 1200 words. Use bullet points where appropriate for \
-clarity. Do not repeat raw data tables — those appear separately in the report.\
+clarity. Do not repeat raw data tables — those appear separately in the report.
+
+GOAL-AWARE ANALYSIS:
+- The user's active fitness goal is provided in the [ACTIVE GOAL] section of the prompt.
+- Frame ALL observations relative to this goal. Every section should answer: "How does this metric relate to the goal?"
+- If a metric is on-track toward the goal, say so explicitly with the data to back it up.
+- If a metric is off-track, identify it clearly and connect it to goal impact.
+- If the goal is marked as "Provisional (AI-inferred)", note this and invite the user to confirm or update it via: python main.py goals
+- If no goal is provided, note that no goal is set and recommend running: python main.py goals
+
+RECOMMENDATIONS FORMAT:
+At the end of your response, after all narrative sections, output a structured block in this exact format:
+
+---RECOMMENDATIONS---
+[HIGH] category: text of recommendation
+[MEDIUM] category: text of recommendation
+[LOW] category: text of recommendation
+---END RECOMMENDATIONS---
+
+- Include 3–5 recommendations total
+- Priority: HIGH, MEDIUM, or LOW
+- Category must be one of: sleep, training, recovery, cardiovascular, nutrition, general
+- Text should be specific and actionable, referencing actual numbers from the data
+- This block must appear AFTER the narrative sections so it does not disrupt the report flow
+
+EVIDENCE-BASED GUIDANCE:
+- If a [KNOWLEDGE BASE] section is provided, draw on it to support your recommendations.
+- If a [RESEARCH CONTEXT] section is provided, cite the specific source by name (e.g. "According to [Source Name]...").
+- Distinguish evidence-based claims from general coaching guidance.
+- Do not fabricate citations. Only cite sources that appear in the provided context blocks.\
 """
+
+
+def _format_goal_for_prompt(goal: dict) -> str:
+    """Format a goal dict into a prompt block."""
+    lines = ["[ACTIVE GOAL]"]
+    lines.append(f"Goal: {goal.get('goal_type', 'Unknown')}")
+    if goal.get("description"):
+        lines.append(f"Description: {goal['description']}")
+    if goal.get("target_date"):
+        lines.append(f"Target date: {goal['target_date']}")
+    if goal.get("provisional"):
+        lines.append("Status: Provisional (AI-inferred)")
+    else:
+        lines.append("Status: Confirmed")
+    return "\n".join(lines)
 
 
 def _format_data_for_prompt(
@@ -33,8 +78,47 @@ def _format_data_for_prompt(
     end_date: str,
     garmin: dict,
     hevy: dict,
+    goal=None,
+    trend_context=None,
+    active_recommendations=None,
+    knowledge_context=None,
 ) -> str:
-    lines = [
+    lines = []
+
+    # 1. Goal block (if available)
+    if goal:
+        try:
+            from goal_manager import format_goal_for_prompt as _ext_fmt
+            lines.append(_ext_fmt(goal))
+        except Exception:
+            lines.append(_format_goal_for_prompt(goal))
+        lines.append("")
+    else:
+        lines.append("[ACTIVE GOAL]\nNo active goal set. Run: python main.py goals")
+        lines.append("")
+
+    # 2. Historical trend context (if available)
+    if trend_context:
+        lines.append(trend_context)
+        lines.append("")
+
+    # 3. Previous recommendations (if available)
+    if active_recommendations:
+        lines.append("[PREVIOUS RECOMMENDATIONS — PLEASE ASSESS EACH]")
+        for rec in active_recommendations:
+            priority_label = {1: "HIGH", 2: "MEDIUM", 3: "LOW"}.get(rec.get("priority", 2), "MEDIUM")
+            lines.append(f"[{priority_label}] [{rec.get('category', 'general').upper()}] {rec.get('text', '')}")
+        lines.append("For each recommendation above, assess: CONTINUED | ESCALATED | RESOLVED")
+        lines.append("Include your assessment in the Recommendations section of your response.")
+        lines.append("")
+
+    # 4. Knowledge context (if available)
+    if knowledge_context:
+        lines.append(knowledge_context)
+        lines.append("")
+
+    # Existing period + Garmin + Hevy content
+    lines += [
         f"REVIEW PERIOD: {period.upper()} ({start_date} to {end_date})",
         "",
         "=== GARMIN HEALTH DATA ===",
@@ -194,8 +278,22 @@ class ClaudeAnalyzer:
         end_date: str,
         garmin_data: dict,
         hevy_summary: dict,
+        goal: dict | None = None,
+        trend_context: str | None = None,
+        active_recommendations: list | None = None,
+        knowledge_context: str | None = None,
     ) -> str:
-        user_content = _format_data_for_prompt(period, start_date, end_date, garmin_data, hevy_summary)
+        user_content = _format_data_for_prompt(
+            period,
+            start_date,
+            end_date,
+            garmin_data,
+            hevy_summary,
+            goal=goal,
+            trend_context=trend_context,
+            active_recommendations=active_recommendations,
+            knowledge_context=knowledge_context,
+        )
 
         print("Generating Claude analysis…")
         response = self._client.messages.create(
@@ -205,3 +303,41 @@ class ClaudeAnalyzer:
             messages=[{"role": "user", "content": user_content}],
         )
         return response.content[0].text
+
+    @staticmethod
+    def parse_recommendations(response: str) -> list[dict]:
+        """
+        Extract structured recommendations from Claude's response.
+        Returns list of dicts: {"priority": int, "category": str, "text": str}
+        Priority: HIGH=1, MEDIUM=2, LOW=3
+        Returns [] if no recommendations block found.
+        """
+        pattern = r'---RECOMMENDATIONS---(.*?)---END RECOMMENDATIONS---'
+        match = re.search(pattern, response, re.DOTALL)
+        if not match:
+            return []
+
+        block = match.group(1).strip()
+        recommendations = []
+        priority_map = {"HIGH": 1, "MEDIUM": 2, "LOW": 3}
+
+        for line in block.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Match: [HIGH] category: text
+            m = re.match(r'\[(HIGH|MEDIUM|LOW)\]\s+(\w+):\s+(.+)', line)
+            if m:
+                recommendations.append({
+                    "priority": priority_map.get(m.group(1), 2),
+                    "category": m.group(2).lower(),
+                    "text": m.group(3).strip()
+                })
+
+        return recommendations
+
+    @staticmethod
+    def strip_recommendations_block(response: str) -> str:
+        """Remove the ---RECOMMENDATIONS--- block from response before saving to report."""
+        return re.sub(r'\n*---RECOMMENDATIONS---.*?---END RECOMMENDATIONS---\n*',
+                      '', response, flags=re.DOTALL).strip()
