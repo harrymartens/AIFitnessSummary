@@ -95,6 +95,8 @@ class ReportGenerator:
         sections.append(self._section_cardio(
             garmin["heart_rate"], garmin["hrv"],
             garmin.get("spo2", {}), garmin.get("respiration", {}), garmin.get("vo2max", {}),
+            garmin.get("fitness_age", {}), garmin.get("endurance_score", {}),
+            garmin.get("race_predictions", {}), garmin.get("lactate_threshold", {}),
         ))
 
         # Sleep Analysis
@@ -102,7 +104,9 @@ class ReportGenerator:
 
         # Recovery & Stress
         sections.append(self._section_recovery(
-            garmin["stress"], garmin["body_battery"], garmin.get("training_readiness", {})
+            garmin["stress"], garmin["body_battery"],
+            garmin.get("training_readiness", {}), garmin.get("morning_readiness", {}),
+            garmin.get("sweat_loss", {}),
         ))
 
         # Body Metrics (only if data available)
@@ -122,7 +126,9 @@ class ReportGenerator:
         sections.append(self._section_runs(garmin.get("runs", {})))
 
         # Training Load
-        sections.append(self._section_training_load(garmin["training_load"]))
+        sections.append(self._section_training_load(
+            garmin["training_load"], garmin.get("weekly_intensity", {}), garmin.get("hill_score", {})
+        ))
 
         # Claude's full narrative (minus the Executive Summary which is shown first)
         insights_key = "Recommendations for Next Period"
@@ -315,22 +321,47 @@ class ReportGenerator:
         ]
         return _h(2, "Activity Overview") + "\n\n" + _table(["Metric", "Value"], rows)
 
-    def _section_cardio(self, hr: dict, hrv: dict, spo2: dict, respiration: dict, vo2max: dict) -> str:
+    def _section_cardio(
+        self, hr: dict, hrv: dict, spo2: dict, respiration: dict, vo2max: dict,
+        fitness_age: dict = None, endurance_score: dict = None,
+        race_predictions: dict = None, lactate_threshold: dict = None,
+    ) -> str:
+        fitness_age = fitness_age or {}
+        endurance_score = endurance_score or {}
+        race_predictions = race_predictions or {}
+        lactate_threshold = lactate_threshold or {}
+
         lines = [_h(2, "Cardiovascular Health"), ""]
 
         rows = [
             ["Average resting heart rate", _fmt(hr.get("avg_resting_hr"), "bpm")],
             ["Period HRV average", _fmt(hrv.get("period_avg_ms"), "ms")],
+            ["VO2 max", _fmt(vo2max.get("vo2_max"), "ml/kg/min")],
+            ["Fitness age", _fmt(fitness_age.get("fitness_age"), "yrs")],
+            ["Achievable fitness age", _fmt(fitness_age.get("achievable_fitness_age"), "yrs")],
+            ["Endurance score", f"{endurance_score.get('score', '—')} ({endurance_score.get('classification', '—')})"],
+            ["Lactate threshold HR", _fmt(lactate_threshold.get("lt_heart_rate"), "bpm")],
+            ["Running FTP", _fmt(lactate_threshold.get("ftp_watts"), "W")],
             ["Average SpO2", _fmt(spo2.get("avg_spo2"), "%")],
             ["Average lowest SpO2", _fmt(spo2.get("avg_lowest_spo2"), "%")],
             ["Avg waking respiration", _fmt(respiration.get("avg_waking_brpm"), "brpm")],
             ["Avg sleep respiration", _fmt(respiration.get("avg_sleep_brpm"), "brpm")],
-            ["VO2 max", _fmt(vo2max.get("vo2_max"), "ml/kg/min")],
-            ["Fitness age", _fmt(vo2max.get("fitness_age"), "yrs")],
         ]
         lines.append(_table(["Metric", "Value"], rows))
-        lines.append("")
 
+        # Race predictions
+        if any(race_predictions.get(k) for k in ("time_5k", "time_10k", "time_half", "time_marathon")):
+            lines.append("")
+            lines.append(_h(3, "Predicted Race Times"))
+            pred_rows = [
+                ["5K", race_predictions.get("time_5k") or "—"],
+                ["10K", race_predictions.get("time_10k") or "—"],
+                ["Half Marathon", race_predictions.get("time_half") or "—"],
+                ["Marathon", race_predictions.get("time_marathon") or "—"],
+            ]
+            lines.append(_table(["Distance", "Predicted Time"], pred_rows))
+
+        lines.append("")
         trend = hr.get("daily_trend", [])
         if trend:
             lines.append(_h(3, "Resting HR Daily Trend"))
@@ -354,17 +385,48 @@ class ReportGenerator:
         lines.append(_table(["Metric", "Average"], averages))
         return "\n".join(lines)
 
-    def _section_recovery(self, stress: dict, battery: dict, readiness: dict) -> str:
+    def _section_recovery(
+        self, stress: dict, battery: dict, readiness: dict,
+        morning_readiness: dict = None, sweat_loss: dict = None,
+    ) -> str:
+        morning_readiness = morning_readiness or {}
+        sweat_loss = sweat_loss or {}
+
         lines = [_h(2, "Recovery & Stress"), ""]
+
+        # Use morning readiness score if available, fall back to training readiness
+        mr_score = morning_readiness.get("avg_score") or readiness.get("avg_score")
+        mr_latest = morning_readiness.get("latest_score") or readiness.get("latest_score")
+        mr_level = morning_readiness.get("latest_level") or readiness.get("latest_level")
+
         summary = [
             ["Average stress level", _fmt(stress.get("avg_stress"), "/100")],
             ["Avg body battery charged", _fmt(battery.get("avg_max"), "pts")],
             ["Avg body battery drained", _fmt(battery.get("avg_min"), "pts")],
-            ["Avg training readiness", _fmt(readiness.get("avg_score"), "/100")],
-            ["Latest readiness score", _fmt(readiness.get("latest_score"), "")],
-            ["Latest readiness level", readiness.get("latest_level") or "—"],
+            ["Avg morning readiness", _fmt(mr_score, "/100")],
+            ["Latest readiness score", _fmt(mr_latest, "")],
+            ["Latest readiness level", mr_level or "—"],
+            ["Avg daily sweat loss", _fmt(sweat_loss.get("avg_sweat_loss_ml"), "mL")],
         ]
         lines.append(_table(["Metric", "Value"], summary))
+
+        # Morning readiness daily detail
+        mr_daily = morning_readiness.get("daily", [])
+        if mr_daily:
+            lines.append("")
+            lines.append(_h(3, "Morning Readiness Detail"))
+            lines.append(_table(
+                ["Date", "Score", "Level", "Sleep Score", "Recovery (h)", "HRV Factor %"],
+                [
+                    [
+                        d["date"], d.get("score", "—"), d.get("level", "—"),
+                        d.get("sleep_score", "—"), d.get("recovery_time_h", "—"),
+                        d.get("hrv_factor_pct", "—"),
+                    ]
+                    for d in mr_daily
+                ]
+            ))
+
         return "\n".join(lines)
 
     def _section_body(self, body: dict) -> str | None:
@@ -435,27 +497,87 @@ class ReportGenerator:
         if individual:
             lines.append(_h(3, "Individual Runs"))
             lines.append(_table(
-                ["Date", "Distance (km)", "Duration (min)", "Avg Pace (min/km)", "Avg HR"],
+                ["Date", "Distance (km)", "Duration (min)", "Avg Pace", "Avg HR",
+                 "Cadence (spm)", "Power (W)", "GCT (ms)"],
                 [
-                    [r["date"], r["distance_km"], r["duration_min"],
-                     _fmt_pace(r.get("avg_pace_min_km")), r.get("avg_hr") or "—"]
+                    [
+                        r["date"], r["distance_km"], r["duration_min"],
+                        _fmt_pace(r.get("avg_pace_min_km")), r.get("avg_hr") or "—",
+                        r.get("running_dynamics", {}).get("avg_cadence_spm") or "—",
+                        r.get("running_dynamics", {}).get("avg_power_w") or "—",
+                        r.get("running_dynamics", {}).get("avg_ground_contact_ms") or "—",
+                    ]
                     for r in individual
                 ]
             ))
+
+            # HR zones for any run that has them
+            runs_with_zones = [r for r in individual if r.get("hr_zones")]
+            if runs_with_zones:
+                lines.append("")
+                lines.append(_h(3, "HR Zone Distribution (% time)"))
+                zone_rows = []
+                for r in runs_with_zones:
+                    zones = r["hr_zones"]
+                    zone_rows.append([
+                        r["date"],
+                        f"{zones.get('zone1_pct', 0)}%",
+                        f"{zones.get('zone2_pct', 0)}%",
+                        f"{zones.get('zone3_pct', 0)}%",
+                        f"{zones.get('zone4_pct', 0)}%",
+                        f"{zones.get('zone5_pct', 0)}%",
+                    ])
+                lines.append(_table(
+                    ["Date", "Z1 (easy)", "Z2 (aerobic)", "Z3 (tempo)", "Z4 (threshold)", "Z5 (max)"],
+                    zone_rows,
+                ))
+
         return "\n".join(lines)
 
-    def _section_training_load(self, load: dict) -> str:
-        lines = [_h(2, "Training Load"), ""]
-        lines.append(f"**Average training load:** {_fmt(load.get('avg_load'), '')}")
-        lines.append(f"**Latest training status:** {load.get('latest_status') or '—'}")
-        lines.append("")
+    def _section_training_load(
+        self, load: dict, weekly_intensity: dict = None, hill_score: dict = None
+    ) -> str:
+        weekly_intensity = weekly_intensity or {}
+        hill_score = hill_score or {}
 
-        daily = load.get("daily", [])
-        if daily:
+        lines = [_h(2, "Training Load"), ""]
+
+        rows = [
+            ["Training status", load.get("status_phrase") or "—"],
+            ["Acute training load", _fmt(load.get("acute_load"), "")],
+            ["Chronic training load", _fmt(load.get("chronic_load"), "")],
+            ["ACWR ratio", _fmt(load.get("acwr_ratio"), "")],
+            ["ACWR status", load.get("acwr_status") or "—"],
+            ["Load balance", load.get("balance_phrase") or "—"],
+            ["Monthly aerobic low load", _fmt(load.get("aerobic_low"), "")],
+            ["Monthly aerobic high load", _fmt(load.get("aerobic_high"), "")],
+            ["Monthly anaerobic load", _fmt(load.get("anaerobic"), "")],
+        ]
+        if hill_score.get("overall_score") is not None:
+            rows.append(["Hill score", f"{hill_score['overall_score']} (strength {hill_score.get('strength_score', '—')}, endurance {hill_score.get('endurance_score', '—')})"])
+
+        lines.append(_table(["Metric", "Value"], rows))
+
+        # Weekly intensity minutes
+        weeks = weekly_intensity.get("weeks", [])
+        if weeks:
+            lines.append("")
+            lines.append(_h(3, "Weekly Intensity Minutes vs Goal"))
             lines.append(_table(
-                ["Date", "Training Load", "Status"],
-                [[d["date"], d.get("training_load", "—"), d.get("status", "—")] for d in daily]
+                ["Week", "Moderate", "Vigorous", "Total Equiv.", "Goal", "Met?"],
+                [
+                    [
+                        w["week_start"],
+                        f"{w['moderate_min']} min",
+                        f"{w['vigorous_min']} min",
+                        f"{w['total_equivalent_min']} min",
+                        f"{w['goal_min']} min",
+                        "Yes" if w["met_goal"] else "No",
+                    ]
+                    for w in weeks
+                ]
             ))
+
         return "\n".join(lines)
 
 

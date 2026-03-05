@@ -158,11 +158,24 @@ def _format_data_for_prompt(
         f"Average waking respiration rate: {resp.get('avg_waking_brpm')} brpm",
         f"Average sleep respiration rate: {resp.get('avg_sleep_brpm')} brpm",
         "",
-        "-- VO2 Max & Fitness Age --",
+        "-- VO2 Max, Fitness Age & Performance --",
         f"VO2 max: {vo2.get('vo2_max')} ml/kg/min",
-        f"Fitness age: {vo2.get('fitness_age')} yrs",
     ]
 
+    fa = garmin.get("fitness_age", {})
+    lt = garmin.get("lactate_threshold", {})
+    es = garmin.get("endurance_score", {})
+    rp = garmin.get("race_predictions", {})
+    lines += [
+        f"Fitness age: {fa.get('fitness_age')} yrs (chronological: {fa.get('chronological_age')}, achievable: {fa.get('achievable_fitness_age')})",
+        f"Endurance score: {es.get('score')} ({es.get('classification')})",
+        f"Lactate threshold HR: {lt.get('lt_heart_rate')} bpm | Running FTP: {lt.get('ftp_watts')} W",
+    ]
+    if any(rp.get(k) for k in ("time_5k", "time_10k", "time_half", "time_marathon")):
+        lines += [
+            "Predicted race times:",
+            f"  5K: {rp.get('time_5k')} | 10K: {rp.get('time_10k')} | Half: {rp.get('time_half')} | Marathon: {rp.get('time_marathon')}",
+        ]
     lines += [
         "",
         "-- Sleep --",
@@ -181,6 +194,8 @@ def _format_data_for_prompt(
         )
 
     readiness = garmin.get("training_readiness", {})
+    mr = garmin.get("morning_readiness", {})
+    sweat = garmin.get("sweat_loss", {})
     lines += [
         "",
         "-- Stress, Recovery & Body Battery --",
@@ -192,19 +207,45 @@ def _format_data_for_prompt(
     lines += [
         f"Average body battery max (charged): {garmin['body_battery'].get('avg_max')}",
         f"Average body battery drain: {garmin['body_battery'].get('avg_min')}",
-        f"Average training readiness score: {readiness.get('avg_score')} / 100",
-        f"Latest training readiness: {readiness.get('latest_score')} ({readiness.get('latest_level')})",
-        "Daily training readiness (date: score / level):",
+        f"Average morning readiness score: {mr.get('avg_score') or readiness.get('avg_score')} / 100",
+        f"Latest morning readiness: {mr.get('latest_score') or readiness.get('latest_score')} ({mr.get('latest_level') or readiness.get('latest_level')})",
+        f"Average daily sweat loss: {sweat.get('avg_sweat_loss_ml')} mL",
+        "Morning readiness detail (date: score / level / sleep-score / recovery-h / HRV-factor%):",
     ]
-    for entry in readiness.get("daily", []):
-        lines.append(f"  {entry['date']}: {entry['score']} / {entry.get('level', 'n/a')}")
+    for d in mr.get("daily", []):
+        lines.append(
+            f"  {d['date']}: {d.get('score')} / {d.get('level')} | "
+            f"sleep {d.get('sleep_score')} | recovery {d.get('recovery_time_h')}h | "
+            f"HRV factor {d.get('hrv_factor_pct')}%"
+        )
 
+    tl = garmin["training_load"]
     lines += [
         "",
         "-- Training Load --",
-        f"Average training load: {garmin['training_load'].get('avg_load')}",
-        f"Latest training status: {garmin['training_load'].get('latest_status')}",
+        f"Training status: {tl.get('status_phrase')}",
+        f"Acute load: {tl.get('acute_load')} | Chronic load: {tl.get('chronic_load')}",
+        f"ACWR ratio: {tl.get('acwr_ratio')} ({tl.get('acwr_status')} — 0.8–1.3 is optimal)",
+        f"Load balance: {tl.get('balance_phrase')}",
+        f"Monthly aerobic-low: {tl.get('aerobic_low')} | aerobic-high: {tl.get('aerobic_high')} | anaerobic: {tl.get('anaerobic')}",
     ]
+
+    weekly = garmin.get("weekly_intensity", {})
+    if weekly.get("weeks"):
+        lines.append("Weekly intensity minutes (moderate / vigorous / total-equiv / goal / met?):")
+        for w in weekly["weeks"]:
+            lines.append(
+                f"  {w['week_start']}: {w['moderate_min']}min mod + {w['vigorous_min']}min vig"
+                f" = {w['total_equivalent_min']}min equiv vs {w['goal_min']}min goal"
+                f" ({'MET' if w['met_goal'] else 'NOT MET'})"
+            )
+
+    hs = garmin.get("hill_score", {})
+    if hs.get("overall_score") is not None:
+        lines.append(
+            f"Hill score: {hs['overall_score']} overall "
+            f"(strength {hs.get('strength_score')}, endurance {hs.get('endurance_score')})"
+        )
 
     body = garmin.get("body_composition", {})
     if body.get("latest_weight_kg"):
@@ -225,13 +266,28 @@ def _format_data_for_prompt(
             f"Runs completed: {runs['run_count']}",
             f"Total distance: {runs['total_distance_km']} km",
             f"Average pace: {runs.get('avg_pace_min_km')} min/km",
-            "Individual runs (date: distance km, pace min/km, avg HR):",
+            "Individual runs (date: distance, pace, avg HR, cadence, power, GCT):",
         ]
         for r in runs.get("runs", []):
-            lines.append(
+            dyn = r.get("running_dynamics", {})
+            zones = r.get("hr_zones", {})
+            run_line = (
                 f"  {r['date']}: {r['distance_km']} km @ {r.get('avg_pace_min_km')} min/km"
                 + (f", HR {r['avg_hr']} bpm" if r.get("avg_hr") else "")
+                + (f", cadence {dyn['avg_cadence_spm']} spm" if dyn.get("avg_cadence_spm") else "")
+                + (f", power {dyn['avg_power_w']} W" if dyn.get("avg_power_w") else "")
+                + (f", GCT {dyn['avg_ground_contact_ms']} ms" if dyn.get("avg_ground_contact_ms") else "")
             )
+            lines.append(run_line)
+            if zones:
+                z1 = zones.get("zone1_pct", 0)
+                z2 = zones.get("zone2_pct", 0)
+                z3 = zones.get("zone3_pct", 0)
+                z4 = zones.get("zone4_pct", 0)
+                z5 = zones.get("zone5_pct", 0)
+                lines.append(
+                    f"    HR zones: Z1 {z1}% | Z2 {z2}% | Z3 {z3}% | Z4 {z4}% | Z5 {z5}%"
+                )
 
     lines += [
         "",

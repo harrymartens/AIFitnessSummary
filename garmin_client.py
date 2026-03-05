@@ -1,5 +1,6 @@
 import datetime
 import os
+import re
 import time
 from pathlib import Path
 
@@ -37,6 +38,34 @@ def _safe_get(func, *args, retries: int = 3, **kwargs):
     return None
 
 
+def _clean_phrase(phrase: str | None) -> str | None:
+    """Convert 'TRAINING_STATUS_2' → 'Training Status'."""
+    if not phrase:
+        return None
+    cleaned = re.sub(r'_\d+$', '', phrase)
+    return cleaned.replace('_', ' ').title()
+
+
+def _fmt_duration(seconds: int | float | None) -> str | None:
+    """Format a seconds value as H:MM:SS or M:SS string."""
+    if seconds is None:
+        return None
+    s = int(round(seconds))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def _get_primary_data(mapping: dict | None) -> dict:
+    """Return the primary-device entry from a deviceId-keyed dict."""
+    if not mapping:
+        return {}
+    for v in mapping.values():
+        if isinstance(v, dict) and v.get("primaryTrainingDevice"):
+            return v
+    return next(iter(mapping.values()), {})
+
+
 class GarminClient:
     """Fetches health and activity data from Garmin Connect."""
 
@@ -44,6 +73,7 @@ class GarminClient:
         email = email or os.environ["GARMIN_EMAIL"]
         password = password or os.environ["GARMIN_PASSWORD"]
         self._client = self._login(email, password)
+        self._training_status_cache: dict[str, dict] = {}
 
     @staticmethod
     def _login(email: str, password: str) -> Garmin:
@@ -89,6 +119,18 @@ class GarminClient:
             raise RuntimeError(
                 "Garmin authentication failed — check GARMIN_EMAIL and GARMIN_PASSWORD."
             ) from exc
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _get_training_status(self, end: datetime.date) -> dict:
+        """Fetch training status once and cache for reuse within a single run."""
+        key = end.strftime(DATE_FORMAT)
+        if key not in self._training_status_cache:
+            result = _safe_get(self._client.get_training_status, key)
+            self._training_status_cache[key] = result or {}
+        return self._training_status_cache[key]
 
     # ------------------------------------------------------------------
     # Individual metric fetchers
@@ -252,26 +294,52 @@ class GarminClient:
             "period_avg_ms": round(sum(values) / len(values), 1) if values else None,
         }
 
-    def fetch_training_load(self, start: datetime.date, end: datetime.date) -> dict:
-        """Training load and status for each day."""
-        daily = []
-        for day in _date_range(start, end):
-            data = _safe_get(self._client.get_training_status, day.strftime(DATE_FORMAT))
-            if not data:
-                continue
-            load = data.get("trainingLoad")
-            status = data.get("trainingLoadStatus") or data.get("status")
-            if load or status:
-                daily.append({
-                    "date": day.strftime(DATE_FORMAT),
-                    "training_load": load,
-                    "status": status,
-                })
+    def fetch_training_load(self, end: datetime.date) -> dict:
+        """Training load and status from the most-recent training status endpoint.
 
-        latest_status = daily[-1]["status"] if daily else None
-        load_vals = [d["training_load"] for d in daily if d["training_load"] is not None]
-        avg_load = round(sum(load_vals) / len(load_vals), 1) if load_vals else None
-        return {"daily": daily, "avg_load": avg_load, "latest_status": latest_status}
+        Bug fix: the old per-day loop used wrong field names that never existed
+        in the API response. The correct structure uses mostRecentTrainingStatus
+        and mostRecentTrainingLoadBalance, which always reflect the latest data
+        regardless of the date parameter passed.
+        """
+        data = self._get_training_status(end)
+        if not data:
+            return {
+                "status_phrase": None, "acute_load": None, "chronic_load": None,
+                "acwr_ratio": None, "acwr_status": None,
+                "balance_phrase": None, "aerobic_low": None, "aerobic_high": None,
+                "anaerobic": None,
+            }
+
+        # Training status: status phrase and acute/chronic load
+        status_map = (data.get("mostRecentTrainingStatus") or {}).get("latestTrainingStatusData") or {}
+        status_dto = _get_primary_data(status_map)
+        status_phrase = _clean_phrase(status_dto.get("trainingStatusFeedbackPhrase"))
+        acute_dto = status_dto.get("acuteTrainingLoadDTO") or {}
+        acute_load = acute_dto.get("dailyTrainingLoadAcute")
+        chronic_load = acute_dto.get("dailyTrainingLoadChronic")
+        acwr_ratio = acute_dto.get("dailyAcuteChronicWorkloadRatio")
+        acwr_status = _clean_phrase(acute_dto.get("acwrStatus"))
+
+        # Load balance: aerobic/anaerobic breakdown
+        balance_map = (data.get("mostRecentTrainingLoadBalance") or {}).get("metricsTrainingLoadBalanceDTOMap") or {}
+        balance_dto = _get_primary_data(balance_map)
+        balance_phrase = _clean_phrase(balance_dto.get("trainingBalanceFeedbackPhrase"))
+        aerobic_low = balance_dto.get("monthlyLoadAerobicLow")
+        aerobic_high = balance_dto.get("monthlyLoadAerobicHigh")
+        anaerobic = balance_dto.get("monthlyLoadAnaerobic")
+
+        return {
+            "status_phrase": status_phrase,
+            "acute_load": round(acute_load) if acute_load is not None else None,
+            "chronic_load": round(chronic_load) if chronic_load is not None else None,
+            "acwr_ratio": round(acwr_ratio, 2) if acwr_ratio is not None else None,
+            "acwr_status": acwr_status,
+            "balance_phrase": balance_phrase,
+            "aerobic_low": round(aerobic_low) if aerobic_low is not None else None,
+            "aerobic_high": round(aerobic_high) if aerobic_high is not None else None,
+            "anaerobic": round(anaerobic) if anaerobic is not None else None,
+        }
 
     def fetch_spo2(self, start: datetime.date, end: datetime.date) -> dict:
         """Average SpO2 (blood oxygen saturation) over the period."""
@@ -336,17 +404,17 @@ class GarminClient:
         }
 
     def fetch_vo2max(self, end: datetime.date) -> dict:
-        """Latest VO2 max and fitness age (fetched for the end date)."""
-        data = _safe_get(self._client.get_max_metrics, end.strftime(DATE_FORMAT))
+        """Latest VO2 max from training status.
+
+        Bug fix: get_max_metrics returns empty for this account. The training
+        status endpoint reliably includes mostRecentVO2Max regardless of date.
+        """
+        data = self._get_training_status(end)
         if not data:
-            return {"vo2_max": None, "fitness_age": None}
-        if isinstance(data, list):
-            data = data[0] if data else {}
-        # Field may be nested under a key like "generic"
-        generic = data.get("generic") or data
+            return {"vo2_max": None}
+        generic = (data.get("mostRecentVO2Max") or {}).get("generic") or {}
         return {
-            "vo2_max": generic.get("vo2MaxPreciseValue") or generic.get("vo2Max"),
-            "fitness_age": generic.get("fitnessAge"),
+            "vo2_max": generic.get("vo2MaxPreciseValue") or generic.get("vo2MaxValue"),
         }
 
     def fetch_body_composition(self, start: datetime.date, end: datetime.date) -> dict:
@@ -372,7 +440,6 @@ class GarminClient:
                 "weight_kg": round(weight_g / 1000, 1),
                 "bmi": entry.get("bmi"),
                 "body_fat_pct": entry.get("bodyFatPercentage"),
-                "muscle_mass_kg": entry.get("muscleMass"),
             })
 
         entries.sort(key=lambda e: e["date"])
@@ -386,7 +453,7 @@ class GarminClient:
         }
 
     def fetch_runs(self, start: datetime.date, end: datetime.date) -> dict:
-        """Running activities over the period."""
+        """Running activities with per-run HR zones and running dynamics."""
         data = _safe_get(
             self._client.get_activities_by_date,
             start.strftime(DATE_FORMAT),
@@ -401,10 +468,44 @@ class GarminClient:
             distance_m = activity.get("distance") or 0
             duration_s = activity.get("duration") or 0
             date = (activity.get("startTimeLocal") or "")[:10]
+            activity_id = activity.get("activityId")
 
             distance_km = round(distance_m / 1000, 2)
             duration_min = round(duration_s / 60, 1)
             pace = round(duration_min / distance_km, 2) if distance_km > 0 else None
+
+            # Enrich with running dynamics from per-km splits
+            running_dynamics = {}
+            hr_zones = {}
+
+            if activity_id:
+                splits_data = _safe_get(self._client.get_activity_splits, activity_id)
+                if splits_data:
+                    laps = splits_data.get("lapDTOs") or []
+                    if laps:
+                        def _lap_avg(key, _laps=laps):
+                            vals = [l[key] for l in _laps if l.get(key) is not None]
+                            return round(sum(vals) / len(vals), 1) if vals else None
+
+                        cadence = _lap_avg("averageRunCadence")
+                        power = _lap_avg("averagePower")
+                        gct = _lap_avg("groundContactTime")
+                        vo = _lap_avg("verticalOscillation")
+                        running_dynamics = {
+                            "avg_cadence_spm": round(cadence) if cadence else None,
+                            "avg_power_w": round(power) if power else None,
+                            "avg_ground_contact_ms": round(gct) if gct else None,
+                            "avg_vertical_oscillation_cm": vo,
+                        }
+
+                zones_data = _safe_get(self._client.get_activity_hr_in_timezones, activity_id)
+                if zones_data and isinstance(zones_data, list):
+                    total_secs = sum(z.get("secsInZone", 0) for z in zones_data)
+                    if total_secs > 0:
+                        hr_zones = {
+                            f"zone{z['zoneNumber']}_pct": round(z.get("secsInZone", 0) / total_secs * 100, 1)
+                            for z in zones_data if z.get("zoneNumber")
+                        }
 
             runs.append({
                 "date": date,
@@ -412,6 +513,9 @@ class GarminClient:
                 "duration_min": duration_min,
                 "avg_pace_min_km": pace,
                 "avg_hr": activity.get("averageHR"),
+                "activity_id": activity_id,
+                "running_dynamics": running_dynamics,
+                "hr_zones": hr_zones,
             })
 
         paces = [r["avg_pace_min_km"] for r in runs if r["avg_pace_min_km"]]
@@ -420,6 +524,174 @@ class GarminClient:
             "run_count": len(runs),
             "total_distance_km": round(sum(r["distance_km"] for r in runs), 2),
             "avg_pace_min_km": round(sum(paces) / len(paces), 2) if paces else None,
+        }
+
+    # ------------------------------------------------------------------
+    # New fetchers (Stage 5A)
+    # ------------------------------------------------------------------
+
+    def fetch_race_predictions(self) -> dict:
+        """Predicted race finish times from Garmin's race predictor model."""
+        data = _safe_get(self._client.get_race_predictions)
+        if not data:
+            return {"time_5k": None, "time_10k": None, "time_half": None, "time_marathon": None}
+        return {
+            "time_5k": _fmt_duration(data.get("time5K")),
+            "time_10k": _fmt_duration(data.get("time10K")),
+            "time_half": _fmt_duration(data.get("timeHalfMarathon")),
+            "time_marathon": _fmt_duration(data.get("timeMarathon")),
+        }
+
+    def fetch_endurance_score(self, start: datetime.date, end: datetime.date) -> dict:
+        """Garmin endurance score with classification label."""
+        data = _safe_get(
+            self._client.get_endurance_score,
+            start.strftime(DATE_FORMAT),
+            end.strftime(DATE_FORMAT),
+        )
+        if not data:
+            return {"score": None, "classification": None}
+
+        dto = data.get("enduranceScoreDTO") or {}
+        score = dto.get("overallScore")
+
+        # Derive classification label from the thresholds in the response
+        thresholds = [
+            (dto.get("classificationLowerLimitElite", 8800), "Elite"),
+            (dto.get("classificationLowerLimitSuperior", 8100), "Superior"),
+            (dto.get("classificationLowerLimitExpert", 7300), "Expert"),
+            (dto.get("classificationLowerLimitWellTrained", 6600), "Well-Trained"),
+            (dto.get("classificationLowerLimitTrained", 5800), "Trained"),
+            (dto.get("classificationLowerLimitIntermediate", 5100), "Intermediate"),
+            (0, "Basic"),
+        ]
+        classification = "Unknown"
+        if score is not None:
+            for threshold, label in thresholds:
+                if score >= threshold:
+                    classification = label
+                    break
+
+        return {"score": score, "classification": classification}
+
+    def fetch_weekly_intensity(self, start: datetime.date, end: datetime.date) -> dict:
+        """Weekly intensity minutes (moderate + vigorous) vs WHO 150-min goal."""
+        data = _safe_get(self._client.get_weekly_intensity_minutes, start.strftime(DATE_FORMAT), end.strftime(DATE_FORMAT))
+        if not data or not isinstance(data, list):
+            return {"weeks": []}
+
+        weeks = []
+        for entry in data:
+            moderate = entry.get("moderateValue") or 0
+            vigorous = entry.get("vigorousValue") or 0
+            goal = entry.get("weeklyGoal") or 150
+            # WHO counts vigorous double toward the 150-min moderate equivalent target
+            total_equivalent = moderate + vigorous * 2
+            weeks.append({
+                "week_start": entry.get("calendarDate"),
+                "moderate_min": moderate,
+                "vigorous_min": vigorous,
+                "goal_min": goal,
+                "total_equivalent_min": total_equivalent,
+                "met_goal": total_equivalent >= goal,
+            })
+        return {"weeks": weeks}
+
+    def fetch_sweat_loss(self, start: datetime.date, end: datetime.date) -> dict:
+        """Daily sweat loss (mL) estimated by Garmin from activity data."""
+        daily = []
+        for day in _date_range(start, end):
+            data = _safe_get(self._client.get_hydration_data, day.strftime(DATE_FORMAT))
+            if not data:
+                continue
+            sweat = data.get("sweatLossInML")
+            if sweat and sweat > 0:
+                daily.append({"date": day.strftime(DATE_FORMAT), "sweat_loss_ml": round(sweat)})
+
+        avg = round(sum(d["sweat_loss_ml"] for d in daily) / len(daily)) if daily else None
+        return {"daily": daily, "avg_sweat_loss_ml": avg}
+
+    def fetch_hill_score(self, start: datetime.date, end: datetime.date) -> dict:
+        """Garmin Hill Score — strength, endurance, and overall climbing ability."""
+        data = _safe_get(
+            self._client.get_hill_score,
+            start.strftime(DATE_FORMAT),
+            end.strftime(DATE_FORMAT),
+        )
+        if not data:
+            return {"overall_score": None, "strength_score": None, "endurance_score": None}
+
+        # Use the latest DTO entry (most recent)
+        dtos = data.get("hillScoreDTOList") or []
+        latest = dtos[0] if dtos else {}
+        return {
+            "overall_score": latest.get("overallScore"),
+            "strength_score": latest.get("strengthScore"),
+            "endurance_score": latest.get("enduranceScore"),
+        }
+
+    def fetch_morning_readiness(self, start: datetime.date, end: datetime.date) -> dict:
+        """Morning training readiness measured post-sleep each day."""
+        daily = []
+        for day in _date_range(start, end):
+            # Morning readiness is recorded for the previous night — use day-1
+            data = _safe_get(
+                self._client.get_morning_training_readiness,
+                day.strftime(DATE_FORMAT),
+            )
+            if not data or not data.get("score"):
+                continue
+            daily.append({
+                "date": data.get("calendarDate") or day.strftime(DATE_FORMAT),
+                "score": data.get("score"),
+                "level": data.get("level"),
+                "sleep_score": data.get("sleepScore"),
+                "recovery_time_h": data.get("recoveryTime"),
+                "hrv_factor_pct": data.get("hrvFactorPercent"),
+                "acute_load": data.get("acuteLoad"),
+            })
+
+        scores = [d["score"] for d in daily if d["score"] is not None]
+        return {
+            "daily": daily,
+            "avg_score": round(sum(scores) / len(scores), 1) if scores else None,
+            "latest_score": daily[-1]["score"] if daily else None,
+            "latest_level": daily[-1].get("level") if daily else None,
+        }
+
+    def fetch_fitness_age(self, end: datetime.date) -> dict:
+        """Fitness age with contributing components."""
+        data = _safe_get(self._client.get_fitnessage_data, end.strftime(DATE_FORMAT))
+        if not data:
+            return {"fitness_age": None, "achievable_fitness_age": None, "chronological_age": None}
+
+        components = data.get("components") or {}
+        rhr = (components.get("rhr") or {}).get("value")
+        bmi = (components.get("bmi") or {}).get("value")
+        vigorous_days = (components.get("vigorousDaysAvg") or {}).get("value")
+        vigorous_min = (components.get("vigorousMinutesAvg") or {}).get("value")
+
+        return {
+            "fitness_age": data.get("fitnessAge"),
+            "achievable_fitness_age": data.get("achievableFitnessAge"),
+            "chronological_age": data.get("chronologicalAge"),
+            "rhr_component": rhr,
+            "bmi_component": bmi,
+            "vigorous_days_avg": vigorous_days,
+            "vigorous_min_avg": vigorous_min,
+        }
+
+    def fetch_lactate_threshold(self) -> dict:
+        """Lactate threshold heart rate and running FTP power."""
+        data = _safe_get(self._client.get_lactate_threshold)
+        if not data:
+            return {"lt_heart_rate": None, "ftp_watts": None}
+
+        shr = data.get("speed_and_heart_rate") or {}
+        power = data.get("power") or {}
+        return {
+            "lt_heart_rate": shr.get("heartRate"),
+            "ftp_watts": power.get("functionalThresholdPower"),
         }
 
     # ------------------------------------------------------------------
@@ -436,11 +708,20 @@ class GarminClient:
             "stress": self.fetch_stress(start, end),
             "body_battery": self.fetch_body_battery(start, end),
             "hrv": self.fetch_hrv(start, end),
-            "training_load": self.fetch_training_load(start, end),
+            "training_load": self.fetch_training_load(end),
             "runs": self.fetch_runs(start, end),
             "spo2": self.fetch_spo2(start, end),
             "respiration": self.fetch_respiration(start, end),
             "training_readiness": self.fetch_training_readiness(start, end),
             "vo2max": self.fetch_vo2max(end),
             "body_composition": self.fetch_body_composition(start, end),
+            # New in Stage 5A
+            "race_predictions": self.fetch_race_predictions(),
+            "endurance_score": self.fetch_endurance_score(start, end),
+            "weekly_intensity": self.fetch_weekly_intensity(start, end),
+            "sweat_loss": self.fetch_sweat_loss(start, end),
+            "hill_score": self.fetch_hill_score(start, end),
+            "morning_readiness": self.fetch_morning_readiness(start, end),
+            "fitness_age": self.fetch_fitness_age(end),
+            "lactate_threshold": self.fetch_lactate_threshold(),
         }
