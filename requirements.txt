@@ -6,3 +6,5 @@ schedule>=1.2.0
 markdown>=3.7
 beautifulsoup4>=4.12
 lxml>=5.0
+pytest>=8.0
+pytest-mock>=3.14
