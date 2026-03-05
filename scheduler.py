@@ -26,7 +26,7 @@ PYTHON = sys.executable
 
 
 def run_review(period: str) -> None:
-    """Import and run main.run() in-process."""
+    """Import and run main.run_review() in-process."""
     from dotenv import load_dotenv
     load_dotenv(PROJECT_DIR / ".env")
 
@@ -34,9 +34,40 @@ def run_review(period: str) -> None:
     import importlib
     main = importlib.import_module("main")
     try:
-        main.run(period)
+        main.run_review(period)
     except Exception as exc:
         print(f"[scheduler] Error during {period} review: {exc}", file=sys.stderr)
+
+
+def check_and_run_catchup():
+    """
+    On scheduler startup, check if any scheduled review was missed in the
+    last 24 hours. If so, run it immediately.
+
+    Logic:
+    - Weekly review due: last Monday at 07:00. If now is Tuesday–Wednesday and
+      it's been < 48 hours since Monday 07:00, run a weekly review.
+    - Monthly review due: 1st of month at 07:00. If now is 2nd–3rd and it's
+      been < 48 hours since the 1st at 07:00, run a monthly review.
+    """
+    from datetime import datetime, timedelta
+    now = datetime.now()
+
+    # Check weekly catch-up (Monday = 0)
+    days_since_monday = now.weekday()  # 0=Mon, 1=Tue, ...
+    if 0 < days_since_monday <= 2:  # Tuesday or Wednesday
+        last_monday = now - timedelta(days=days_since_monday)
+        scheduled = last_monday.replace(hour=7, minute=0, second=0, microsecond=0)
+        if now > scheduled and (now - scheduled) < timedelta(hours=48):
+            print(f"Catch-up: running missed weekly review (scheduled {scheduled})")
+            run_review("weekly")
+
+    # Check monthly catch-up (1st of month)
+    if 1 < now.day <= 3:
+        scheduled = now.replace(day=1, hour=7, minute=0, second=0, microsecond=0)
+        if now > scheduled and (now - scheduled) < timedelta(hours=48):
+            print(f"Catch-up: running missed monthly review (scheduled {scheduled})")
+            run_review("monthly")
 
 
 def _monthly_check() -> None:
@@ -47,6 +78,8 @@ def _monthly_check() -> None:
 
 def daemon() -> None:
     """Run the scheduler loop indefinitely."""
+    check_and_run_catchup()
+
     schedule.every().monday.at("07:00").do(run_review, period="weekly")
     schedule.every().day.at("07:00").do(_monthly_check)
 
