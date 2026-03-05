@@ -32,13 +32,19 @@ class ReportGenerator:
         garmin_data: dict,
         hevy_summary: dict,
         claude_narrative: str,
+        goal: dict = None,
+        trend_context_str: str = None,
+        followup_summary_str: str = None,
     ) -> Path:
         REPORT_DIR.mkdir(exist_ok=True)
         filename = f"{period}_review_{end_date.strftime(DATE_FORMAT)}.md"
         output_path = REPORT_DIR / filename
 
         sections = self._build_sections(
-            period, start_date, end_date, garmin_data, hevy_summary, claude_narrative
+            period, start_date, end_date, garmin_data, hevy_summary, claude_narrative,
+            goal=goal,
+            trend_context_str=trend_context_str,
+            followup_summary_str=followup_summary_str,
         )
         output_path.write_text("\n\n".join(sections), encoding="utf-8")
         return output_path
@@ -55,6 +61,9 @@ class ReportGenerator:
         garmin: dict,
         hevy: dict,
         narrative: str,
+        goal: dict = None,
+        trend_context_str: str = None,
+        followup_summary_str: str = None,
     ) -> list[str]:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         header = "\n".join([
@@ -75,6 +84,9 @@ class ReportGenerator:
             "Executive Summary",
             _h(2, "Executive Summary") + "\n\n_No summary generated._"
         ))
+
+        # Goal Progress (immediately after Executive Summary)
+        sections.append(self._section_goal_progress(goal, garmin, hevy))
 
         # Activity Overview (raw data table)
         sections.append(self._section_activity(garmin["stats"]))
@@ -98,6 +110,11 @@ class ReportGenerator:
         if body_section:
             sections.append(body_section)
 
+        # Progress Over Time (trend overview — after Body Metrics, before Strength Training)
+        trend_section = self._section_trend_overview(trend_context_str)
+        if trend_section:
+            sections.append(trend_section)
+
         # Strength Training (Hevy)
         sections.append(self._section_strength(hevy))
 
@@ -113,7 +130,139 @@ class ReportGenerator:
         remaining = self._narrative_minus_exec(narrative)
         sections.append(_h(2, "Claude's Insights & Recommendations") + "\n\n" + remaining)
 
+        # Recommendation Follow-up (after Claude's Insights & Recommendations)
+        followup_section = self._section_recommendation_followup(followup_summary_str)
+        if followup_section:
+            sections.append(followup_section)
+
         return sections
+
+    def _section_goal_progress(self, goal: dict, garmin_data: dict, hevy_data: dict) -> str:
+        if not goal:
+            return (
+                _h(2, "Goal Progress") + "\n\n"
+                "_No active goal set. Run `python main.py goals` to set one._"
+            )
+
+        objective = goal.get("primary_objective", "N/A")
+        timeline_weeks = goal.get("timeline_weeks")
+        is_provisional = goal.get("is_provisional", 0)
+        status_label = "Provisional (unconfirmed)" if is_provisional else "Active (Confirmed)"
+
+        header_parts = [f"**Objective:** {objective}"]
+        if timeline_weeks is not None:
+            header_parts[0] += f" — {timeline_weeks} weeks remaining"
+        header_parts.append(f"**Status:** {status_label}")
+
+        # Gather current metrics from garmin/hevy data
+        stats = garmin_data.get("stats", {})
+        sleep = garmin_data.get("sleep", {})
+        hr = garmin_data.get("heart_rate", {})
+        body = garmin_data.get("body_composition", {})
+        current_weight = body.get("latest_weight_kg")
+        current_steps = stats.get("avg_daily_steps")
+        current_sleep = sleep.get("avg_total_h")
+        current_workouts = hevy_data.get("workouts_per_week")
+        current_resting_hr = hr.get("avg_resting_hr")
+
+        rows = []
+
+        # Weight
+        target_weight = goal.get("target_weight_kg")
+        if target_weight is not None and current_weight is not None:
+            diff = current_weight - target_weight
+            pct = current_weight / target_weight if target_weight else None
+            if diff <= 0:
+                icon = "🟢"
+                note = "On target"
+            elif pct is not None and pct <= 1.10:
+                icon = "🟡"
+                note = f"+{diff:.1f} kg to go"
+            else:
+                icon = "🔴"
+                note = f"+{diff:.1f} kg to go"
+            rows.append(["Weight", f"{target_weight} kg", f"{current_weight} kg", f"{icon} {note}"])
+
+        # Daily Steps
+        target_steps = goal.get("target_steps_per_day")
+        if target_steps is not None and current_steps is not None:
+            pct = current_steps / target_steps if target_steps else None
+            if pct is not None and pct >= 0.95:
+                icon = "🟢"
+                note = "On target"
+            elif pct is not None and pct >= 0.85:
+                icon = "🟡"
+                note = f"{pct * 100:.0f}% of target"
+            else:
+                icon = "🔴"
+                note = f"{pct * 100:.0f}% of target" if pct is not None else "Below target"
+            rows.append(["Daily Steps", f"{target_steps:,}", f"{int(current_steps):,}", f"{icon} {note}"])
+
+        # Sleep
+        target_sleep = goal.get("target_sleep_hours")
+        if target_sleep is not None and current_sleep is not None:
+            pct = current_sleep / target_sleep if target_sleep else None
+            if pct is not None and pct >= 0.95:
+                icon = "🟢"
+                note = "On target"
+            elif pct is not None and pct >= 0.85:
+                icon = "🟡"
+                note = f"{pct * 100:.0f}% of target"
+            else:
+                icon = "🔴"
+                note = f"{pct * 100:.0f}% of target" if pct is not None else "Below target"
+            rows.append(["Sleep", f"{target_sleep} hrs", f"{current_sleep} hrs", f"{icon} {note}"])
+
+        # Workouts/Week
+        target_workouts = goal.get("target_workouts_per_week")
+        if target_workouts is not None and current_workouts is not None:
+            pct = current_workouts / target_workouts if target_workouts else None
+            if pct is not None and pct >= 0.95:
+                icon = "🟢"
+                note = "On target"
+            elif pct is not None and pct >= 0.85:
+                icon = "🟡"
+                note = f"{pct * 100:.0f}% of target"
+            else:
+                icon = "🔴"
+                note = f"{pct * 100:.0f}% of target" if pct is not None else "Below target"
+            rows.append(["Workouts/Week", str(target_workouts), str(current_workouts), f"{icon} {note}"])
+
+        # Resting HR (lower is better — invert the ratio)
+        target_hr = goal.get("target_resting_hr")
+        if target_hr is not None and current_resting_hr is not None:
+            # For HR, current <= target is good; current much higher than target is bad
+            diff_pct = (current_resting_hr - target_hr) / target_hr if target_hr else 0
+            if diff_pct <= 0.05:
+                icon = "🟢"
+                note = "On target"
+            elif diff_pct <= 0.15:
+                icon = "🟡"
+                note = "Close"
+            else:
+                icon = "🔴"
+                note = f"{current_resting_hr - target_hr:+.0f} bpm off target"
+            rows.append(["Resting HR", f"{target_hr} bpm", f"{current_resting_hr} bpm", f"{icon} {note}"])
+
+        lines = [_h(2, "Goal Progress"), ""]
+        lines.extend(header_parts)
+        lines.append("")
+        if rows:
+            lines.append(_table(["Metric", "Target", "Current", "Status"], rows))
+        else:
+            lines.append("_No comparable metrics available for this goal._")
+
+        return "\n".join(lines)
+
+    def _section_trend_overview(self, trend_context_str: str) -> str:
+        if not trend_context_str:
+            return ""
+        return _h(2, "Progress Over Time") + "\n\n" + trend_context_str
+
+    def _section_recommendation_followup(self, followup_summary_str: str) -> str:
+        if not followup_summary_str:
+            return ""
+        return _h(2, "Recommendation Follow-up") + "\n\n" + followup_summary_str
 
     def _split_narrative(self, narrative: str) -> dict[str, str]:
         """Parse Claude's response into a dict keyed by section heading."""
