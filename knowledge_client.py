@@ -219,3 +219,351 @@ def get_knowledge_context(metrics: dict) -> str:
         sections.append(f"[KNOWLEDGE BASE — {label}]\n{summarised}")
 
     return "\n\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
+# Stage 4B — Live research: PubMed + examine.com with SQLite caching
+# ---------------------------------------------------------------------------
+
+_USER_AGENT = "AIFitnessSummary/1.0 (personal fitness tracker)"
+
+_ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+_EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+
+
+def search_pubmed(query: str, max_results: int = 3) -> list[dict]:
+    """Search PubMed for relevant abstracts.
+
+    Returns list of dicts with keys:
+        title, abstract, authors, year, pmid
+
+    Returns an empty list on any error (network, parse, etc.).
+    """
+    headers = {"User-Agent": _USER_AGENT}
+
+    # --- Step 1: esearch to obtain PMIDs ---
+    try:
+        search_resp = requests.post(
+            _ESEARCH_URL,
+            params={
+                "db": "pubmed",
+                "term": query,
+                "retmax": max_results,
+                "retmode": "json",
+                "sort": "relevance",
+            },
+            headers=headers,
+            timeout=10,
+        )
+        search_resp.raise_for_status()
+        search_data = search_resp.json()
+        pmids = search_data.get("esearchresult", {}).get("idlist", [])
+    except Exception as exc:
+        print(f"[knowledge_client] PubMed esearch failed: {exc}", file=sys.stderr)
+        return []
+
+    if not pmids:
+        return []
+
+    # Polite delay between requests to NCBI
+    time.sleep(1)
+
+    # --- Step 2: efetch to retrieve XML abstracts ---
+    try:
+        fetch_resp = requests.post(
+            _EFETCH_URL,
+            params={
+                "db": "pubmed",
+                "id": ",".join(pmids),
+                "rettype": "abstract",
+                "retmode": "xml",
+            },
+            headers=headers,
+            timeout=10,
+        )
+        fetch_resp.raise_for_status()
+        xml_content = fetch_resp.text
+    except Exception as exc:
+        print(f"[knowledge_client] PubMed efetch failed: {exc}", file=sys.stderr)
+        return []
+
+    # --- Step 3: Parse XML ---
+    try:
+        soup = BeautifulSoup(xml_content, "lxml-xml")
+        articles = soup.find_all("PubmedArticle")
+        results: list[dict] = []
+
+        for article in articles:
+            # Title
+            title_tag = article.find("ArticleTitle")
+            title = title_tag.get_text(separator=" ", strip=True) if title_tag else ""
+
+            # Abstract — join multiple AbstractText blocks
+            abstract_tags = article.find_all("AbstractText")
+            abstract = " ".join(
+                tag.get_text(separator=" ", strip=True) for tag in abstract_tags
+            ).strip()
+
+            # Authors — first 3 last names, "et al." if more
+            last_name_tags = article.find_all("LastName")
+            last_names = [t.get_text(strip=True) for t in last_name_tags]
+            if len(last_names) > 3:
+                authors = ", ".join(last_names[:3]) + " et al."
+            else:
+                authors = ", ".join(last_names)
+
+            # Year
+            year_tag = article.find("PubDate")
+            year = ""
+            if year_tag:
+                y = year_tag.find("Year")
+                year = y.get_text(strip=True) if y else ""
+
+            # PMID
+            pmid_tag = article.find("PMID")
+            pmid = pmid_tag.get_text(strip=True) if pmid_tag else ""
+
+            results.append(
+                {
+                    "title": title,
+                    "abstract": abstract,
+                    "authors": authors,
+                    "year": year,
+                    "pmid": pmid,
+                }
+            )
+
+        return results
+    except Exception as exc:
+        print(f"[knowledge_client] PubMed XML parse failed: {exc}", file=sys.stderr)
+        return []
+
+
+def fetch_examine(topic: str) -> dict | None:
+    """Fetch the summary for a topic from examine.com.
+
+    Tries https://examine.com/topics/{slug}/ first.
+    Returns {"topic": topic, "summary": text, "url": url} or None on any error.
+    """
+    slug = topic.lower().replace(" ", "-")
+    url = f"https://examine.com/topics/{slug}/"
+    headers = {"User-Agent": _USER_AGENT}
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=8)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        # Try common summary containers in priority order
+        summary_text = ""
+
+        for selector in [
+            {"class": "summary-box"},
+            {"class": "examine-summary"},
+        ]:
+            tag = soup.find("div", selector)
+            if tag:
+                summary_text = tag.get_text(separator=" ", strip=True)
+                break
+
+        if not summary_text:
+            # First <p> inside <article> or <main>
+            for container_name in ("article", "main"):
+                container = soup.find(container_name)
+                if container:
+                    first_p = container.find("p")
+                    if first_p:
+                        summary_text = first_p.get_text(separator=" ", strip=True)
+                        break
+
+        if not summary_text:
+            # Fallback: meta description
+            meta = soup.find("meta", attrs={"name": "description"})
+            if meta and meta.get("content"):
+                summary_text = meta["content"].strip()
+
+        if not summary_text:
+            return None
+
+        return {
+            "topic": topic,
+            "summary": summary_text[:500],
+            "url": url,
+        }
+    except Exception:
+        # Silently return None — examine.com may block or change structure
+        return None
+
+
+def get_research_context(metrics: dict, goal: dict | None = None) -> str:
+    """Determine relevant research queries, check cache, fetch if stale.
+
+    Returns a formatted [RESEARCH CONTEXT] block string, or empty string
+    if all fetches fail or no queries can be determined.
+    """
+    # ------------------------------------------------------------------
+    # 1. Determine research queries (max 2)
+    # ------------------------------------------------------------------
+    queries: list[str] = []
+
+    hrv_data = metrics.get("hrv", {})
+    sleep_data = metrics.get("sleep", {})
+    activity_data = metrics.get("stats", {})  # Garmin stats sub-dict
+    workout_count = metrics.get("workout_count", 0)
+
+    hrv_avg = hrv_data.get("period_avg_ms")
+    sleep_avg = sleep_data.get("avg_total_h")
+    avg_steps = activity_data.get("avg_daily_steps")
+
+    workouts_per_week = metrics.get("workouts_per_week", 0)
+
+    # HRV signal
+    if hrv_avg is not None and hrv_avg < 45:
+        _append_unique(queries, "HRV heart rate variability training recovery athletes")
+
+    # Sleep signal
+    if len(queries) < 2 and sleep_avg is not None and sleep_avg < 6.5:
+        _append_unique(queries, "sleep deprivation athletic performance strength")
+
+    # Low activity signal
+    if len(queries) < 2 and avg_steps is not None and avg_steps < 5000:
+        _append_unique(queries, "low physical activity health outcomes sedentary")
+
+    # High training frequency signal
+    if len(queries) < 2 and workouts_per_week >= 5:
+        _append_unique(queries, "training frequency recovery overtraining prevention")
+
+    # Goal-based signals
+    primary_obj = (goal or {}).get("primary_objective", "")
+    if primary_obj:
+        obj_lower = primary_obj.lower()
+        if len(queries) < 2 and "weight" in obj_lower:
+            _append_unique(queries, "resistance training fat loss body composition")
+        if len(queries) < 2 and ("cardio" in obj_lower or "endurance" in obj_lower):
+            _append_unique(queries, "VO2 max training adaptations aerobic")
+
+    # Default fallback
+    if not queries:
+        queries.append("exercise recovery sleep performance optimization")
+
+    # ------------------------------------------------------------------
+    # 2. Fetch / retrieve from cache for each query
+    # ------------------------------------------------------------------
+    try:
+        db = get_db()
+    except Exception as exc:
+        print(f"[knowledge_client] DB unavailable: {exc}", file=sys.stderr)
+        db = None
+
+    pubmed_sections: list[str] = []
+
+    for query in queries[:2]:
+        cache_key = "pubmed:" + hashlib.md5(query.encode()).hexdigest()
+        result_text: str | None = None
+
+        # Cache check
+        if db is not None:
+            try:
+                cached = db.get_cached_knowledge(cache_key)
+                if cached:
+                    result_text = cached["result_text"]
+            except Exception as exc:
+                print(f"[knowledge_client] Cache read failed: {exc}", file=sys.stderr)
+
+        # Live fetch on cache miss
+        if result_text is None:
+            papers = search_pubmed(query, max_results=2)
+            if papers:
+                lines: list[str] = []
+                for p in papers:
+                    abstract_snippet = p["abstract"][:200]
+                    if len(p["abstract"]) > 200:
+                        abstract_snippet += "..."
+                    byline = f"{p['authors']}, {p['year']}".strip(", ")
+                    lines.append(f"• {p['title']} ({byline}): {abstract_snippet}")
+                result_text = "\n".join(lines)
+
+                if db is not None:
+                    try:
+                        db.save_knowledge_cache(cache_key, "pubmed", query, result_text)
+                    except Exception as exc:
+                        print(
+                            f"[knowledge_client] Cache write failed: {exc}",
+                            file=sys.stderr,
+                        )
+
+        if result_text:
+            pubmed_sections.append(
+                f'PubMed — "{query}":\n{result_text}'
+            )
+
+    # ------------------------------------------------------------------
+    # 3. Examine.com fetch for goal-relevant supplement topic
+    # ------------------------------------------------------------------
+    examine_section = ""
+    if goal is not None:
+        obj_lower = (goal.get("primary_objective") or "").lower()
+        examine_topic: str | None = None
+        if "weight" in obj_lower:
+            examine_topic = "caloric-restriction"
+        elif "strength" in obj_lower:
+            examine_topic = "creatine"
+        elif "cardio" in obj_lower or "endurance" in obj_lower:
+            examine_topic = "caffeine"
+
+        if examine_topic:
+            cache_key = "examine:" + hashlib.md5(examine_topic.encode()).hexdigest()
+            result_text = None
+
+            if db is not None:
+                try:
+                    cached = db.get_cached_knowledge(cache_key)
+                    if cached:
+                        result_text = cached["result_text"]
+                except Exception as exc:
+                    print(
+                        f"[knowledge_client] Examine cache read failed: {exc}",
+                        file=sys.stderr,
+                    )
+
+            if result_text is None:
+                examine_data = fetch_examine(examine_topic)
+                if examine_data:
+                    result_text = examine_data["summary"]
+                    if db is not None:
+                        try:
+                            db.save_knowledge_cache(
+                                cache_key,
+                                "examine",
+                                examine_topic,
+                                result_text,
+                            )
+                        except Exception as exc:
+                            print(
+                                f"[knowledge_client] Examine cache write failed: {exc}",
+                                file=sys.stderr,
+                            )
+
+            if result_text:
+                label = examine_topic.replace("-", " ").title()
+                examine_section = f"Examine.com — {label}:\n{result_text}"
+
+    # ------------------------------------------------------------------
+    # 4. Assemble output block
+    # ------------------------------------------------------------------
+    all_sections = pubmed_sections + ([examine_section] if examine_section else [])
+    if not all_sections:
+        return ""
+
+    body = "\n\n".join(all_sections)
+    # Token budget: keep total output under 600 chars
+    if len(body) > 560:
+        body = body[:557] + "..."
+
+    return f"[RESEARCH CONTEXT]\n\n{body}"
+
+
+def _append_unique(lst: list[str], item: str) -> None:
+    """Append *item* to *lst* only if not already present."""
+    if item not in lst:
+        lst.append(item)
