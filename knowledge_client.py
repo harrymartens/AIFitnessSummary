@@ -3,10 +3,18 @@ knowledge_client.py
 
 Provides evidence-based fitness knowledge to inject into Claude prompts.
 Stage 4A: Curated knowledge base selection and summarisation.
-Stage 4B (separate): PubMed + examine.com live search and caching.
+Stage 4B: PubMed + examine.com live search and SQLite caching.
 """
 
+import hashlib
+import sys
+import time
 from pathlib import Path
+
+import requests
+from bs4 import BeautifulSoup
+
+from db_client import get_db
 
 KNOWLEDGE_BASE_DIR = Path(__file__).parent / "knowledge_base"
 
