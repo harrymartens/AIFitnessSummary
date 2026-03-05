@@ -215,6 +215,14 @@ class RecommendationTracker:
         Search *response* for RESOLVED / CONTINUED / ESCALATED near *rec_text*.
 
         Returns "RESOLVED", "ESCALATED", or "CONTINUED" (default).
+
+        Strategy:
+        1. First attempt an exact substring match of the full rec text.
+        2. If not found, fall back to keyword matching.
+        3. Once a position is found, search only FORWARD from that position
+           (up to FOLLOWUP_WINDOW chars ahead) for the status label.  We avoid
+           looking backwards so that a status from a preceding recommendation
+           cannot bleed into the current one's detection window.
         """
         # Try exact substring match first
         pos = response.find(rec_text)
@@ -226,13 +234,15 @@ class RecommendationTracker:
         if pos == -1:
             return "CONTINUED"
 
-        window_start = max(0, pos - FOLLOWUP_WINDOW)
-        window_end = min(len(response), pos + len(rec_text) + FOLLOWUP_WINDOW)
-        context = response[window_start:window_end].upper()
+        # Look forward from the match position only, to avoid picking up status
+        # labels that belong to a preceding recommendation.
+        forward_start = pos
+        forward_end = min(len(response), pos + len(rec_text) + FOLLOWUP_WINDOW)
+        forward_context = response[forward_start:forward_end].upper()
 
-        if "RESOLVED" in context:
+        if "RESOLVED" in forward_context:
             return "RESOLVED"
-        if "ESCALATED" in context:
+        if "ESCALATED" in forward_context:
             return "ESCALATED"
         # CONTINUED or no signal
         return "CONTINUED"
