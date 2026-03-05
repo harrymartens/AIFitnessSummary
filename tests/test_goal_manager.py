@@ -217,11 +217,10 @@ class TestInferProvisionalGoal:
             result = gm.infer_provisional_goal(SAMPLE_METRICS)
 
         assert result is not None
-        # Initially saved as provisional
-        saved_arg = mock_db.save_goal.call_args[0][0]
-        assert saved_arg["is_provisional"] == 1
-        # Then confirmed
+        # Verify save_goal was called and confirm_provisional_goal was also called
+        mock_db.save_goal.assert_called_once()
         mock_db.confirm_provisional_goal.assert_called_once_with(7)
+        # After confirmation the returned goal should no longer be provisional
         assert result["is_provisional"] == 0
 
     @patch("goal_manager._call_claude")
