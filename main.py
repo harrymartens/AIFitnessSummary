@@ -71,13 +71,28 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate a weekly or monthly AI fitness review."
     )
+    subparsers = parser.add_subparsers(dest='command')
+
+    # 'goals' subcommand
+    subparsers.add_parser('goals', help='Set up or update your fitness goals')
+
     parser.add_argument(
         "--period",
         choices=list(VALID_PERIODS),
-        required=True,
         help="Review period: 'weekly' (last 7 days) or 'monthly' (last 30 days)",
     )
     args = parser.parse_args()
+
+    if args.command == 'goals':
+        from goal_manager import GoalManager
+        from db_client import get_db
+        gm = GoalManager(get_db(), ClaudeAnalyzer())
+        gm.run_wizard()
+        return
+
+    # Default: generate fitness review
+    if not args.period:
+        parser.error("--period is required when not using a subcommand (e.g. --period weekly)")
 
     try:
         run(args.period)
