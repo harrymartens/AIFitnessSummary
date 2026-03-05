@@ -1,4 +1,5 @@
 import datetime
+import os
 from pathlib import Path
 
 REPORT_DIR = Path("reports")
@@ -10,6 +11,9 @@ WEEKLY_DAYS = 7
 MONTHLY_DAYS = 30
 
 VALID_PERIODS = ("weekly", "monthly")
+
+
+DB_PATH = os.getenv("DB_PATH", str(Path(__file__).parent / "fitness_memory.db"))
 
 
 def get_date_range(period: str) -> tuple[datetime.date, datetime.date]:
