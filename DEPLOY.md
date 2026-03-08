@@ -1,33 +1,47 @@
-# Deploying with GitHub Actions
+# Deploying with GitHub Actions + Supabase
 
 This guide sets up automated weekly and monthly fitness reviews using GitHub
-Actions — no server, no VPS, no cron jobs to maintain.
+Actions and a free Supabase database — no server, no VPS, no cron jobs.
 
 ## How It Works
 
 - **Weekly reviews** run every Monday at 07:00 UTC
 - **Monthly reviews** run on the 1st of each month at 07:00 UTC
-- Reports are emailed to you and committed back to the repo
-- The SQLite database (`fitness_memory.db`) persists in the repo between runs
-- You can also trigger a review manually from the Actions tab
+- Reports are emailed to you automatically
+- All data (goals, reviews, recommendations, trends) persists in Supabase
+- You can trigger a review manually from the Actions tab anytime
 
 ## Setup (One-Time)
 
-### 1. Complete the initial Garmin login locally
+### 1. Create a free Supabase project
+
+1. Go to [supabase.com](https://supabase.com) and create a free account
+2. Create a new project (any name, e.g. "fitness-summary")
+3. Choose a region close to you and set a database password
+4. Once created, go to **Settings → Database → Connection string → URI**
+5. Copy the connection string — it looks like:
+   ```
+   postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres
+   ```
+6. Replace `[password]` with the database password you set
+
+The app automatically creates all required tables on first run.
+
+### 2. Complete the initial Garmin login locally
 
 Garmin requires a one-time MFA verification (6-digit email code). Run locally:
 
 ```bash
 pip install -r requirements.txt
 cp .env.example .env
-# Fill in .env with your credentials
+# Fill in .env with your credentials (including DATABASE_URL from step 1)
 python main.py --period weekly
 ```
 
 Enter the MFA code when prompted. This creates cached OAuth tokens at
 `~/.garminconnect` that last ~1 year.
 
-### 2. Export Garmin tokens for GitHub Actions
+### 3. Export Garmin tokens for GitHub Actions
 
 ```bash
 bash export_garmin_tokens.sh
@@ -35,22 +49,23 @@ bash export_garmin_tokens.sh
 
 Copy the base64 output string.
 
-### 3. Add GitHub repository secrets
+### 4. Add GitHub repository secrets
 
 Go to your repo → **Settings → Secrets and variables → Actions** and add:
 
-| Secret Name          | Value                                          |
-|----------------------|------------------------------------------------|
-| `GARMIN_EMAIL`       | Your Garmin Connect email                      |
-| `GARMIN_PASSWORD`    | Your Garmin Connect password                   |
-| `GARMIN_TOKENS_B64`  | Base64 string from step 2                      |
-| `HEVY_API_KEY`       | From https://hevy.com/settings?developer       |
+| Secret Name          | Value                                            |
+|----------------------|--------------------------------------------------|
+| `DATABASE_URL`       | Supabase connection string from step 1           |
+| `GARMIN_EMAIL`       | Your Garmin Connect email                        |
+| `GARMIN_PASSWORD`    | Your Garmin Connect password                     |
+| `GARMIN_TOKENS_B64`  | Base64 string from step 3                        |
+| `HEVY_API_KEY`       | From https://hevy.com/settings?developer         |
 | `ANTHROPIC_API_KEY`  | From https://console.anthropic.com/settings/keys |
-| `EMAIL_SENDER`       | Your Gmail address                             |
-| `EMAIL_RECIPIENT`    | Where to receive reports                       |
-| `GMAIL_APP_PASSWORD` | 16-char Gmail App Password (see .env.example)  |
+| `EMAIL_SENDER`       | Your Gmail address                               |
+| `EMAIL_RECIPIENT`    | Where to receive reports                         |
+| `GMAIL_APP_PASSWORD` | 16-char Gmail App Password (see .env.example)    |
 
-### 4. Push to GitHub
+### 5. Push to GitHub
 
 ```bash
 git add .
@@ -58,10 +73,20 @@ git commit -m "Add GitHub Actions workflow for automated fitness reviews"
 git push
 ```
 
-### 5. Test it
+### 6. Test it
 
 Go to **Actions → Fitness Review → Run workflow** and select a period. Check
 your email for the report.
+
+## Local Development
+
+For local development, you can use either backend:
+
+- **Supabase**: Set `DATABASE_URL` in `.env` to your connection string
+- **SQLite**: Leave `DATABASE_URL` unset — uses local `fitness_memory.db`
+
+Both backends share the same schema and API. Your local SQLite database and
+Supabase are independent — data does not sync between them.
 
 ## Adjusting the Schedule
 
@@ -85,8 +110,9 @@ If reviews start failing with Garmin auth errors:
 2. Run `bash export_garmin_tokens.sh`
 3. Update the `GARMIN_TOKENS_B64` secret in GitHub
 
-### Viewing history
+### Viewing your data
 
-All reports are committed to the `reports/` directory. The SQLite database
-`fitness_memory.db` tracks goals, review history, recommendations, and trends
-across all runs.
+- **Email reports**: Delivered to your inbox on schedule
+- **Supabase dashboard**: Browse your data at supabase.com → Table Editor
+- **Local reports**: Run locally with `python main.py --period weekly` for
+  on-demand reviews saved to `reports/`
