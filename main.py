@@ -138,12 +138,7 @@ def run_review(period: str) -> Path:
     # 13. Update review with report path
     if review_saved and review_id is not None:
         try:
-            conn = db._get_conn()
-            conn.execute(
-                "UPDATE reviews SET report_path=? WHERE id=?",
-                (str(report_path), review_id),
-            )
-            conn.commit()
+            db.update_review_report_path(review_id, str(report_path))
         except Exception:
             pass
 

@@ -1,0 +1,86 @@
+# Automated AI Fitness Summary — GitHub Actions
+#
+# Runs weekly (Monday 7:00 AM UTC) and monthly (1st of month, 7:00 AM UTC)
+# fitness reviews, then emails the report. Adjust the cron times below to
+# match your preferred timezone offset.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   GARMIN_EMAIL, GARMIN_PASSWORD, HEVY_API_KEY, ANTHROPIC_API_KEY,
+#   EMAIL_SENDER, EMAIL_RECIPIENT, GMAIL_APP_PASSWORD,
+#   GARMIN_TOKENS_B64, DATABASE_URL  (see DEPLOY.md for setup)
+
+name: Fitness Review
+
+on:
+  schedule:
+    # Weekly: every Monday at 07:00 UTC (adjust for your timezone)
+    - cron: "0 7 * * 1"
+    # Monthly: 1st of each month at 07:00 UTC
+    - cron: "0 7 1 * *"
+  workflow_dispatch:
+    inputs:
+      period:
+        description: "Review period"
+        required: true
+        default: "weekly"
+        type: choice
+        options:
+          - weekly
+          - monthly
+
+jobs:
+  fitness-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore Garmin OAuth tokens
+        run: |
+          mkdir -p ~/.garminconnect
+          echo "${{ secrets.GARMIN_TOKENS_B64 }}" | base64 -d | tar xz -C ~/.garminconnect
+
+      - name: Determine review period
+        id: period
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "period=${{ github.event.inputs.period }}" >> "$GITHUB_OUTPUT"
+          else
+            # For scheduled runs: check which cron triggered
+            DAY_OF_MONTH=$(date -u +%d)
+            if [ "$DAY_OF_MONTH" = "01" ]; then
+              echo "period=monthly" >> "$GITHUB_OUTPUT"
+            else
+              echo "period=weekly" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Run fitness review
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          HEVY_API_KEY: ${{ secrets.HEVY_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python main.py --period ${{ steps.period.outputs.period }}
+
+      - name: Save updated Garmin tokens
+        if: always()
+        run: |
+          if [ -d ~/.garminconnect ]; then
+            echo "::notice::Garmin tokens may have been refreshed. If reviews start failing, re-export tokens."
+          fi
