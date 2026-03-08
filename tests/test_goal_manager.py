@@ -20,27 +20,35 @@ def _make_gm(db=None, claude=None):
 
 
 FULL_GOAL = {
-    "primary_objective": "Weight Loss",
-    "target_weight_kg": 80.0,
+    "primary_objective": "Lean bulk with strength focus",
+    "body_comp_goal": "bulk",
+    "target_weight_kg": 85.0,
+    "weight_change_kg_per_month": 0.5,
     "target_steps_per_day": 10000,
     "target_sleep_hours": 7.5,
-    "target_workouts_per_week": 4,
-    "target_resting_hr": 60,
-    "target_vo2max": 45.0,
-    "timeline_weeks": 16,
-    "notes": "Focus on fat loss while maintaining muscle mass",
+    "gym_sessions_per_week": 4,
+    "runs_per_week": 3,
+    "run_types": "2 easy runs, 1 interval session",
+    "gym_description": "4-day upper/lower split",
+    "gym_goals": "Bench 100 kg, squat 140 kg",
+    "running_goals": "Sub-20 5K",
+    "notes": "Focus on strength while maintaining cardio",
     "is_provisional": 0,
 }
 
 MINIMAL_GOAL = {
     "primary_objective": "General Fitness",
+    "body_comp_goal": None,
     "target_weight_kg": None,
+    "weight_change_kg_per_month": None,
     "target_steps_per_day": None,
     "target_sleep_hours": None,
-    "target_workouts_per_week": None,
-    "target_resting_hr": None,
-    "target_vo2max": None,
-    "timeline_weeks": None,
+    "gym_sessions_per_week": None,
+    "runs_per_week": None,
+    "run_types": None,
+    "gym_description": None,
+    "gym_goals": None,
+    "running_goals": None,
     "notes": None,
     "is_provisional": 0,
 }
@@ -56,15 +64,18 @@ class TestFormatGoalForPrompt:
         result = gm.format_goal_for_prompt(FULL_GOAL)
 
         assert "[ACTIVE GOAL]" in result
-        assert "Weight Loss" in result
-        assert "80.0" in result
+        assert "Lean bulk" in result
+        assert "bulk" in result.lower()
+        assert "85.0" in result
+        assert "+0.5 kg/month" in result
         assert "10,000" in result
         assert "7.5 hrs/night" in result
-        assert "4" in result
-        assert "60 bpm" in result
-        assert "45.0" in result
-        assert "16 weeks" in result
-        assert "Focus on fat loss" in result
+        assert "Gym Sessions/Week: 4" in result
+        assert "Runs/Week: 3" in result
+        assert "2 easy runs" in result
+        assert "upper/lower" in result
+        assert "Bench 100 kg" in result
+        assert "Sub-20 5K" in result
         assert "Active (confirmed)" in result
 
     def test_provisional_goal_shows_provisional_status(self):
@@ -87,21 +98,32 @@ class TestFormatGoalForPrompt:
         result = gm.format_goal_for_prompt({"primary_objective": "Build Muscle"})
         assert result.startswith("[ACTIVE GOAL]")
 
+    def test_legacy_workouts_field_still_works(self):
+        """Old goals with target_workouts_per_week should still display."""
+        gm = _make_gm()
+        legacy = {"primary_objective": "Get fit", "target_workouts_per_week": 3}
+        result = gm.format_goal_for_prompt(legacy)
+        assert "Workouts/Week: 3" in result
+
 
 # ---------------------------------------------------------------------------
 # run_wizard tests
 # ---------------------------------------------------------------------------
 
 CLAUDE_GOAL_JSON = {
-    "primary_objective": "Weight Loss",
-    "target_weight_kg": 80.0,
+    "primary_objective": "Lean bulk with strength and running focus",
+    "body_comp_goal": "bulk",
+    "target_weight_kg": 85.0,
+    "weight_change_kg_per_month": 0.5,
     "target_steps_per_day": 10000,
-    "target_sleep_hours": 7.5,
-    "target_workouts_per_week": 4,
-    "target_resting_hr": 60,
-    "target_vo2max": None,
-    "timeline_weeks": 12,
-    "notes": "Lose 7 kg over 12 weeks",
+    "target_sleep_hours": 8.0,
+    "gym_sessions_per_week": 4,
+    "runs_per_week": 3,
+    "run_types": "2 easy runs, 1 interval session",
+    "gym_description": "4-day upper/lower split",
+    "gym_goals": "Bench 100 kg",
+    "running_goals": "Sub-20 5K",
+    "notes": "Lean bulk phase",
 }
 
 
@@ -109,15 +131,19 @@ class TestRunWizard:
     def _wizard_inputs(self, save_answer="y"):
         """Return a list of input() return values for a full wizard run."""
         return [
-            "lose weight",   # primary goal
-            "87",            # current weight
-            "80",            # target weight
-            "12",            # timeline weeks
-            "4",             # workouts per week
-            "10000",         # daily steps
-            "7.5",           # sleep hours
-            "no sugar",      # notes
-            save_answer,     # save? (y/n)
+            "bulk",              # body comp goal
+            "85",                # goal weight
+            "+0.5",              # weight rate
+            "10000",             # daily steps
+            "8",                 # sleep hours
+            "4",                 # gym sessions
+            "3",                 # runs per week
+            "2 easy, 1 interval",  # run types
+            "upper/lower split", # gym description
+            "bench 100kg",       # gym goals
+            "sub-20 5k",         # running goals
+            "",                  # notes
+            save_answer,         # save? (y/n)
         ]
 
     @patch("goal_manager._call_claude")
@@ -131,7 +157,7 @@ class TestRunWizard:
             result = gm.run_wizard()
 
         assert result is not None
-        assert result["primary_objective"] == "Weight Loss"
+        assert result["primary_objective"] == "Lean bulk with strength and running focus"
         assert result["is_provisional"] == 0
         mock_db.save_goal.assert_called_once()
         saved_arg = mock_db.save_goal.call_args[0][0]
@@ -191,6 +217,26 @@ class TestRunWizard:
         assert result is None
         mock_db.save_goal.assert_not_called()
 
+    @patch("goal_manager._call_claude")
+    def test_wizard_prompt_includes_new_fields(self, mock_call_claude):
+        """Verify the prompt sent to Claude includes the new goal fields."""
+        mock_call_claude.return_value = json.dumps(CLAUDE_GOAL_JSON)
+        mock_db = MagicMock()
+        mock_db.save_goal.return_value = 1
+        gm = _make_gm(db=mock_db)
+
+        with patch("builtins.input", side_effect=self._wizard_inputs("y")):
+            gm.run_wizard()
+
+        prompt = mock_call_claude.call_args[0][0]
+        assert "Body comp goal:" in prompt
+        assert "Gym sessions per week:" in prompt
+        assert "Runs per week:" in prompt
+        assert "Run types:" in prompt
+        assert "Gym training description:" in prompt
+        assert "Gym goals:" in prompt
+        assert "Running goals:" in prompt
+
 
 # ---------------------------------------------------------------------------
 # infer_provisional_goal tests
@@ -217,10 +263,8 @@ class TestInferProvisionalGoal:
             result = gm.infer_provisional_goal(SAMPLE_METRICS)
 
         assert result is not None
-        # Verify save_goal was called and confirm_provisional_goal was also called
         mock_db.save_goal.assert_called_once()
         mock_db.confirm_provisional_goal.assert_called_once_with(7)
-        # After confirmation the returned goal should no longer be provisional
         assert result["is_provisional"] == 0
 
     @patch("goal_manager._call_claude")

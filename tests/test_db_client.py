@@ -167,6 +167,14 @@ class TestGoalCRUD:
             "target_resting_hr",
             "target_vo2max",
             "timeline_weeks",
+            "body_comp_goal",
+            "weight_change_kg_per_month",
+            "gym_sessions_per_week",
+            "runs_per_week",
+            "run_types",
+            "gym_description",
+            "gym_goals",
+            "running_goals",
             "notes",
         ):
             assert active[field] is None, f"Expected None for {field}"

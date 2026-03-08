@@ -118,7 +118,7 @@ class TestDatabaseIntegration:
         # Verify goal is active
         active_goal = db.get_active_goal()
         assert active_goal is not None
-        assert active_goal["primary_objective"] == "weight loss"
+        assert active_goal["primary_objective"] == "Lean bulk with strength focus"
 
         # Save review
         review_id = db.save_review({

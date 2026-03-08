@@ -66,12 +66,19 @@ class ReportGenerator:
         followup_summary_str: str = None,
     ) -> list[str]:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        sources = "Garmin Connect · Hevy App"
+        body_comp = garmin.get("body_composition", {})
+        if body_comp.get("source") == "apple_health" or any(
+            e.get("source") == "apple_health" for e in body_comp.get("entries", []) if isinstance(e, dict)
+        ):
+            sources += " · Apple Health"
+        sources += " · Claude (`claude-sonnet-4-6`)"
         header = "\n".join([
             f"# {period.capitalize()} Fitness Review — {end.strftime('%B %d, %Y')}",
             "",
             f"**Period:** {start.strftime(DATE_FORMAT)} → {end.strftime(DATE_FORMAT)}  ",
             f"**Generated:** {now}  ",
-            f"**Sources:** Garmin Connect · Hevy App · Claude (`claude-sonnet-4-6`)  ",
+            f"**Sources:** {sources}  ",
         ])
 
         # Split Claude narrative into labelled sections
@@ -151,42 +158,44 @@ class ReportGenerator:
             )
 
         objective = goal.get("primary_objective", "N/A")
-        timeline_weeks = goal.get("timeline_weeks")
         is_provisional = goal.get("is_provisional", 0)
         status_label = "Provisional (unconfirmed)" if is_provisional else "Active (Confirmed)"
 
         header_parts = [f"**Objective:** {objective}"]
-        if timeline_weeks is not None:
-            header_parts[0] += f" — {timeline_weeks} weeks remaining"
+        body_comp = goal.get("body_comp_goal")
+        if body_comp:
+            header_parts.append(f"**Body Composition:** {body_comp.capitalize()}")
         header_parts.append(f"**Status:** {status_label}")
 
         # Gather current metrics from garmin/hevy data
         stats = garmin_data.get("stats", {})
         sleep = garmin_data.get("sleep", {})
         hr = garmin_data.get("heart_rate", {})
-        body = garmin_data.get("body_composition", {})
-        current_weight = body.get("latest_weight_kg")
+        body_data = garmin_data.get("body_composition", {})
+        runs = garmin_data.get("runs", {})
+        current_weight = body_data.get("latest_weight_kg")
         current_steps = stats.get("avg_daily_steps")
         current_sleep = sleep.get("avg_total_h")
-        current_workouts = hevy_data.get("workouts_per_week")
+        current_gym = hevy_data.get("workouts_per_week")
+        current_runs = runs.get("run_count")
         current_resting_hr = hr.get("avg_resting_hr")
 
         rows = []
 
-        # Weight
+        # Weight target
         target_weight = goal.get("target_weight_kg")
         if target_weight is not None and current_weight is not None:
             diff = current_weight - target_weight
-            pct = current_weight / target_weight if target_weight else None
-            if diff <= 0:
+            abs_diff = abs(diff)
+            if abs_diff <= 0.5:
                 icon = "🟢"
                 note = "On target"
-            elif pct is not None and pct <= 1.10:
+            elif abs_diff <= target_weight * 0.05:
                 icon = "🟡"
-                note = f"+{diff:.1f} kg to go"
+                note = f"{diff:+.1f} kg from goal"
             else:
                 icon = "🔴"
-                note = f"+{diff:.1f} kg to go"
+                note = f"{diff:+.1f} kg from goal"
             rows.append(["Weight", f"{target_weight} kg", f"{current_weight} kg", f"{icon} {note}"])
 
         # Daily Steps
@@ -219,10 +228,10 @@ class ReportGenerator:
                 note = f"{pct * 100:.0f}% of target" if pct is not None else "Below target"
             rows.append(["Sleep", f"{target_sleep} hrs", f"{current_sleep} hrs", f"{icon} {note}"])
 
-        # Workouts/Week
-        target_workouts = goal.get("target_workouts_per_week")
-        if target_workouts is not None and current_workouts is not None:
-            pct = current_workouts / target_workouts if target_workouts else None
+        # Gym Sessions/Week
+        target_gym = goal.get("gym_sessions_per_week") or goal.get("target_workouts_per_week")
+        if target_gym is not None and current_gym is not None:
+            pct = current_gym / target_gym if target_gym else None
             if pct is not None and pct >= 0.95:
                 icon = "🟢"
                 note = "On target"
@@ -232,12 +241,29 @@ class ReportGenerator:
             else:
                 icon = "🔴"
                 note = f"{pct * 100:.0f}% of target" if pct is not None else "Below target"
-            rows.append(["Workouts/Week", str(target_workouts), str(current_workouts), f"{icon} {note}"])
+            rows.append(["Gym/Week", str(target_gym), str(current_gym), f"{icon} {note}"])
 
-        # Resting HR (lower is better — invert the ratio)
+        # Runs/Week
+        target_runs = goal.get("runs_per_week")
+        period_days = 7  # default to weekly
+        if target_runs is not None and current_runs is not None:
+            # Normalize run count to per-week
+            runs_per_week = current_runs if period_days <= 7 else round(current_runs / (period_days / 7), 1)
+            pct = runs_per_week / target_runs if target_runs else None
+            if pct is not None and pct >= 0.95:
+                icon = "🟢"
+                note = "On target"
+            elif pct is not None and pct >= 0.75:
+                icon = "🟡"
+                note = f"{runs_per_week}/{target_runs}"
+            else:
+                icon = "🔴"
+                note = f"{runs_per_week}/{target_runs}"
+            rows.append(["Runs/Week", str(target_runs), str(runs_per_week), f"{icon} {note}"])
+
+        # Resting HR (lower is better)
         target_hr = goal.get("target_resting_hr")
         if target_hr is not None and current_resting_hr is not None:
-            # For HR, current <= target is good; current much higher than target is bad
             diff_pct = (current_resting_hr - target_hr) / target_hr if target_hr else 0
             if diff_pct <= 0.05:
                 icon = "🟢"
@@ -257,6 +283,20 @@ class ReportGenerator:
             lines.append(_table(["Metric", "Target", "Current", "Status"], rows))
         else:
             lines.append("_No comparable metrics available for this goal._")
+
+        # Training details (non-tabular goal info)
+        details = []
+        if goal.get("gym_description"):
+            details.append(f"**Gym Training:** {goal['gym_description']}")
+        if goal.get("gym_goals"):
+            details.append(f"**Gym Goals:** {goal['gym_goals']}")
+        if goal.get("run_types"):
+            details.append(f"**Run Types:** {goal['run_types']}")
+        if goal.get("running_goals"):
+            details.append(f"**Running Goals:** {goal['running_goals']}")
+        if details:
+            lines.append("")
+            lines.extend(details)
 
         return "\n".join(lines)
 

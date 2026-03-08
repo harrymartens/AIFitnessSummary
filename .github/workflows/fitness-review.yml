@@ -7,7 +7,7 @@
 # Required repository secrets (Settings → Secrets and variables → Actions):
 #   GARMIN_EMAIL, GARMIN_PASSWORD, HEVY_API_KEY, ANTHROPIC_API_KEY,
 #   EMAIL_SENDER, EMAIL_RECIPIENT, GMAIL_APP_PASSWORD,
-#   GARMIN_TOKENS_B64, DATABASE_URL  (see DEPLOY.md for setup)
+#   GARMIN_TOKENS_B64, DATABASE_URL, APPLE_HEALTH_WEIGHT_URL  (see DEPLOY.md for setup)
 
 name: Fitness Review
 
@@ -76,6 +76,7 @@ jobs:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          APPLE_HEALTH_WEIGHT_URL: ${{ secrets.APPLE_HEALTH_WEIGHT_URL }}
         run: python main.py --period ${{ steps.period.outputs.period }}
 
       - name: Save updated Garmin tokens
