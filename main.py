@@ -22,6 +22,7 @@ from db_client import get_db
 from email_client import get_email_client
 from garmin_client import GarminClient
 from goal_manager import GoalManager
+from googlefit_client import get_googlefit_client
 from hevy_client import HevyClient
 from knowledge_client import get_knowledge_context, get_research_context
 from recommendation_tracker import RecommendationTracker
@@ -64,6 +65,36 @@ def run_review(period: str) -> Path:
         garmin_data = garmin.collect_all(start_date, end_date)
     except Exception as e:
         print(f"Warning: Could not fetch Garmin data: {e}", file=sys.stderr)
+
+    # 6b. Supplement body composition with Google Fit weight data (Eufy scale)
+    gfit = get_googlefit_client()
+    if gfit:
+        try:
+            gfit_weight = gfit.fetch_weight(start_date, end_date)
+            if gfit_weight.get("entries"):
+                print(f"Fetched {len(gfit_weight['entries'])} weight entries from Google Fit.")
+                garmin_body = garmin_data.get("body_composition", {})
+                if not garmin_body.get("latest_weight_kg"):
+                    # No Garmin weight data — use Google Fit entirely
+                    garmin_data["body_composition"] = {**garmin_body, **gfit_weight}
+                else:
+                    # Merge: combine entries, prefer Google Fit for days where
+                    # Garmin has no entry (scale data is typically more accurate)
+                    garmin_dates = {e["date"] for e in garmin_body.get("entries", [])}
+                    merged = list(garmin_body.get("entries", []))
+                    for e in gfit_weight["entries"]:
+                        if e["date"] not in garmin_dates:
+                            merged.append(e)
+                    merged.sort(key=lambda e: e["date"])
+                    weights = [e["weight_kg"] for e in merged]
+                    garmin_data["body_composition"] = {
+                        **garmin_body,
+                        "entries": merged,
+                        "latest_weight_kg": merged[-1]["weight_kg"] if merged else garmin_body.get("latest_weight_kg"),
+                        "avg_weight_kg": round(sum(weights) / len(weights), 1) if weights else garmin_body.get("avg_weight_kg"),
+                    }
+        except Exception as e:
+            print(f"Warning: Could not fetch Google Fit data: {e}", file=sys.stderr)
 
     # 7. Fetch Hevy data
     hevy_summary = {}

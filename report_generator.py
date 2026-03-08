@@ -66,12 +66,19 @@ class ReportGenerator:
         followup_summary_str: str = None,
     ) -> list[str]:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        sources = "Garmin Connect · Hevy App"
+        body_comp = garmin.get("body_composition", {})
+        if body_comp.get("source") == "google_fit" or any(
+            e.get("source") == "google_fit" for e in body_comp.get("entries", []) if isinstance(e, dict)
+        ):
+            sources += " · Google Fit"
+        sources += " · Claude (`claude-sonnet-4-6`)"
         header = "\n".join([
             f"# {period.capitalize()} Fitness Review — {end.strftime('%B %d, %Y')}",
             "",
             f"**Period:** {start.strftime(DATE_FORMAT)} → {end.strftime(DATE_FORMAT)}  ",
             f"**Generated:** {now}  ",
-            f"**Sources:** Garmin Connect · Hevy App · Claude (`claude-sonnet-4-6`)  ",
+            f"**Sources:** {sources}  ",
         ])
 
         # Split Claude narrative into labelled sections
