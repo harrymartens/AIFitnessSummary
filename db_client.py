@@ -24,13 +24,21 @@ CREATE TABLE IF NOT EXISTS goals (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     primary_objective TEXT NOT NULL,
+    body_comp_goal TEXT,
     target_weight_kg REAL,
+    weight_change_kg_per_month REAL,
     target_steps_per_day INTEGER,
     target_sleep_hours REAL,
     target_workouts_per_week INTEGER,
     target_resting_hr INTEGER,
     target_vo2max REAL,
     timeline_weeks INTEGER,
+    gym_sessions_per_week INTEGER,
+    runs_per_week INTEGER,
+    run_types TEXT,
+    gym_description TEXT,
+    gym_goals TEXT,
+    running_goals TEXT,
     notes TEXT,
     is_active INTEGER DEFAULT 1,
     is_provisional INTEGER DEFAULT 0
@@ -97,13 +105,21 @@ CREATE TABLE IF NOT EXISTS goals (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     primary_objective TEXT NOT NULL,
+    body_comp_goal TEXT,
     target_weight_kg DOUBLE PRECISION,
+    weight_change_kg_per_month DOUBLE PRECISION,
     target_steps_per_day INTEGER,
     target_sleep_hours DOUBLE PRECISION,
     target_workouts_per_week INTEGER,
     target_resting_hr INTEGER,
     target_vo2max DOUBLE PRECISION,
     timeline_weeks INTEGER,
+    gym_sessions_per_week INTEGER,
+    runs_per_week INTEGER,
+    run_types TEXT,
+    gym_description TEXT,
+    gym_goals TEXT,
+    running_goals TEXT,
     notes TEXT,
     is_active INTEGER DEFAULT 1,
     is_provisional INTEGER DEFAULT 0
@@ -261,7 +277,7 @@ class DatabaseClient:
             return cur.lastrowid
 
     def _init_schema(self) -> None:
-        """Create all tables if they do not already exist."""
+        """Create all tables if they do not already exist, then migrate."""
         conn = self._get_conn()
         if self._pg:
             cur = conn.cursor()
@@ -270,6 +286,30 @@ class DatabaseClient:
         else:
             conn.executescript(SQLITE_SCHEMA_SQL)
             conn.commit()
+        self._migrate_goals_table()
+
+    def _migrate_goals_table(self) -> None:
+        """Add new goal columns to existing databases if they are missing."""
+        new_columns = [
+            ("body_comp_goal", "TEXT"),
+            ("weight_change_kg_per_month", "REAL" if not self._pg else "DOUBLE PRECISION"),
+            ("gym_sessions_per_week", "INTEGER"),
+            ("runs_per_week", "INTEGER"),
+            ("run_types", "TEXT"),
+            ("gym_description", "TEXT"),
+            ("gym_goals", "TEXT"),
+            ("running_goals", "TEXT"),
+        ]
+        conn = self._get_conn()
+        for col_name, col_type in new_columns:
+            try:
+                self._execute(f"ALTER TABLE goals ADD COLUMN {col_name} {col_type}")
+                conn.commit()
+            except Exception:
+                # Column already exists — expected on non-fresh databases
+                if self._pg:
+                    conn.rollback()
+                pass
 
     @staticmethod
     def _now_iso() -> str:
@@ -286,13 +326,21 @@ class DatabaseClient:
             goal.get("created_at", now),
             goal.get("updated_at", now),
             goal["primary_objective"],
+            goal.get("body_comp_goal"),
             goal.get("target_weight_kg"),
+            goal.get("weight_change_kg_per_month"),
             goal.get("target_steps_per_day"),
             goal.get("target_sleep_hours"),
             goal.get("target_workouts_per_week"),
             goal.get("target_resting_hr"),
             goal.get("target_vo2max"),
             goal.get("timeline_weeks"),
+            goal.get("gym_sessions_per_week"),
+            goal.get("runs_per_week"),
+            goal.get("run_types"),
+            goal.get("gym_description"),
+            goal.get("gym_goals"),
+            goal.get("running_goals"),
             goal.get("notes"),
             goal.get("is_active", 1),
             goal.get("is_provisional", 0),
@@ -300,10 +348,13 @@ class DatabaseClient:
         sql = """
             INSERT INTO goals (
                 created_at, updated_at, primary_objective,
-                target_weight_kg, target_steps_per_day, target_sleep_hours,
+                body_comp_goal, target_weight_kg, weight_change_kg_per_month,
+                target_steps_per_day, target_sleep_hours,
                 target_workouts_per_week, target_resting_hr, target_vo2max,
-                timeline_weeks, notes, is_active, is_provisional
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                timeline_weeks, gym_sessions_per_week, runs_per_week,
+                run_types, gym_description, gym_goals, running_goals,
+                notes, is_active, is_provisional
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         return self._insert_returning_id(sql, params)
 

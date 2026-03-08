@@ -24,13 +24,17 @@ from config import MODEL
 # JSON keys Claude must return
 GOAL_KEYS = [
     "primary_objective",
+    "body_comp_goal",
     "target_weight_kg",
+    "weight_change_kg_per_month",
     "target_steps_per_day",
     "target_sleep_hours",
-    "target_workouts_per_week",
-    "target_resting_hr",
-    "target_vo2max",
-    "timeline_weeks",
+    "gym_sessions_per_week",
+    "runs_per_week",
+    "run_types",
+    "gym_description",
+    "gym_goals",
+    "running_goals",
     "notes",
 ]
 
@@ -73,20 +77,40 @@ def _display_goal(goal: dict) -> None:
     """Print a human-readable summary of a goal dict."""
     print("\n--- Goal Summary ---")
     print(f"  Primary Objective     : {goal.get('primary_objective', 'N/A')}")
+
+    body_comp = goal.get("body_comp_goal")
+    if body_comp:
+        print(f"  Body Composition      : {body_comp}")
+
     if goal.get("target_weight_kg") is not None:
         print(f"  Target Weight         : {goal['target_weight_kg']} kg")
+
+    rate = goal.get("weight_change_kg_per_month")
+    if rate is not None:
+        if rate > 0:
+            print(f"  Weight Gain Rate      : +{rate} kg/month")
+        elif rate < 0:
+            print(f"  Weight Loss Rate      : {rate} kg/month")
+
     if goal.get("target_steps_per_day") is not None:
         print(f"  Target Steps/Day      : {goal['target_steps_per_day']:,}")
     if goal.get("target_sleep_hours") is not None:
         print(f"  Target Sleep          : {goal['target_sleep_hours']} hrs/night")
-    if goal.get("target_workouts_per_week") is not None:
-        print(f"  Target Workouts/Week  : {goal['target_workouts_per_week']}")
-    if goal.get("target_resting_hr") is not None:
-        print(f"  Target Resting HR     : {goal['target_resting_hr']} bpm")
-    if goal.get("target_vo2max") is not None:
-        print(f"  Target VO2 Max        : {goal['target_vo2max']} ml/kg/min")
-    if goal.get("timeline_weeks") is not None:
-        print(f"  Timeline              : {goal['timeline_weeks']} weeks")
+
+    if goal.get("gym_sessions_per_week") is not None:
+        print(f"  Gym Sessions/Week     : {goal['gym_sessions_per_week']}")
+    if goal.get("runs_per_week") is not None:
+        print(f"  Runs/Week             : {goal['runs_per_week']}")
+    if goal.get("run_types"):
+        print(f"  Run Types             : {goal['run_types']}")
+
+    if goal.get("gym_description"):
+        print(f"  Gym Training          : {goal['gym_description']}")
+    if goal.get("gym_goals"):
+        print(f"  Gym Goals             : {goal['gym_goals']}")
+    if goal.get("running_goals"):
+        print(f"  Running Goals         : {goal['running_goals']}")
+
     if goal.get("notes"):
         print(f"  Notes                 : {goal['notes']}")
     print("--------------------\n")
@@ -121,25 +145,17 @@ class GoalManager:
 
         answers = {}
 
-        answers["primary_goal"] = input(
-            "What is your primary fitness goal? "
-            "(e.g. lose weight, build muscle, improve cardio, general fitness)\n> "
-        ).strip()
-
-        answers["current_weight"] = input(
-            "\nWhat is your current weight in kg? (press Enter to skip)\n> "
+        answers["body_comp_goal"] = input(
+            "Do you want to bulk, cut, or maintain?\n> "
         ).strip()
 
         answers["target_weight"] = input(
-            "\nWhat is your target weight in kg? (press Enter to skip)\n> "
+            "\nWhat is your goal weight in kg? (press Enter to skip)\n> "
         ).strip()
 
-        answers["timeline_weeks"] = input(
-            "\nHow many weeks do you want to achieve this in? (press Enter to skip)\n> "
-        ).strip()
-
-        answers["workouts_per_week"] = input(
-            "\nHow many workouts per week are you aiming for? (press Enter to skip)\n> "
+        answers["weight_rate"] = input(
+            "\nHow much weight do you want to gain or lose per month (kg)? "
+            "(e.g. +0.5 for lean bulk, -2 for a cut, 0 for maintain)\n> "
         ).strip()
 
         answers["daily_steps"] = input(
@@ -148,6 +164,30 @@ class GoalManager:
 
         answers["sleep_hours"] = input(
             "\nHow many hours of sleep per night are you aiming for? (press Enter to skip)\n> "
+        ).strip()
+
+        answers["gym_sessions"] = input(
+            "\nHow many gym sessions per week? (press Enter to skip)\n> "
+        ).strip()
+
+        answers["runs_per_week"] = input(
+            "\nHow many runs per week? (press Enter to skip)\n> "
+        ).strip()
+
+        answers["run_types"] = input(
+            "\nWhat types of runs? (e.g. 2 easy runs, 1 interval session, 1 long run)\n> "
+        ).strip()
+
+        answers["gym_description"] = input(
+            "\nDescribe your gym training. (e.g. 4-day upper/lower split, PPL, full body)\n> "
+        ).strip()
+
+        answers["gym_goals"] = input(
+            "\nWhat are your gym goals? (e.g. bench 100 kg, gain muscle, improve squat)\n> "
+        ).strip()
+
+        answers["running_goals"] = input(
+            "\nWhat are your running goals? (e.g. sub-20 5K, complete a half marathon)\n> "
         ).strip()
 
         answers["notes"] = input(
@@ -257,20 +297,19 @@ class GoalManager:
         return goal
 
     def format_goal_for_prompt(self, goal: dict) -> str:
-        """Format the active goal as a structured text block for Claude prompt injection.
-
-        Example output::
-
-            [ACTIVE GOAL]
-            Primary Objective: Weight Loss
-            Target Weight: 80 kg (current: 87 kg)
-            ...
-        """
+        """Format the active goal as a structured text block for Claude prompt injection."""
         lines = ["[ACTIVE GOAL]"]
         lines.append(f"Primary Objective: {goal.get('primary_objective', 'N/A')}")
 
+        if goal.get("body_comp_goal"):
+            lines.append(f"Body Composition Goal: {goal['body_comp_goal']}")
+
         if goal.get("target_weight_kg") is not None:
             lines.append(f"Target Weight: {goal['target_weight_kg']} kg")
+
+        rate = goal.get("weight_change_kg_per_month")
+        if rate is not None:
+            lines.append(f"Weight Change Rate: {rate:+g} kg/month")
 
         if goal.get("target_steps_per_day") is not None:
             lines.append(f"Target Steps/Day: {goal['target_steps_per_day']:,}")
@@ -278,7 +317,26 @@ class GoalManager:
         if goal.get("target_sleep_hours") is not None:
             lines.append(f"Target Sleep: {goal['target_sleep_hours']} hrs/night")
 
-        if goal.get("target_workouts_per_week") is not None:
+        if goal.get("gym_sessions_per_week") is not None:
+            lines.append(f"Gym Sessions/Week: {goal['gym_sessions_per_week']}")
+
+        if goal.get("runs_per_week") is not None:
+            lines.append(f"Runs/Week: {goal['runs_per_week']}")
+
+        if goal.get("run_types"):
+            lines.append(f"Run Types: {goal['run_types']}")
+
+        if goal.get("gym_description"):
+            lines.append(f"Gym Training: {goal['gym_description']}")
+
+        if goal.get("gym_goals"):
+            lines.append(f"Gym Goals: {goal['gym_goals']}")
+
+        if goal.get("running_goals"):
+            lines.append(f"Running Goals: {goal['running_goals']}")
+
+        # Legacy fields (still supported from older goals)
+        if goal.get("target_workouts_per_week") is not None and not goal.get("gym_sessions_per_week"):
             lines.append(f"Target Workouts/Week: {goal['target_workouts_per_week']}")
 
         if goal.get("target_resting_hr") is not None:
@@ -286,9 +344,6 @@ class GoalManager:
 
         if goal.get("target_vo2max") is not None:
             lines.append(f"Target VO2 Max: {goal['target_vo2max']} ml/kg/min")
-
-        if goal.get("timeline_weeks") is not None:
-            lines.append(f"Timeline: {goal['timeline_weeks']} weeks")
 
         if goal.get("notes"):
             lines.append(f"Notes: {goal['notes']}")
@@ -312,17 +367,32 @@ class GoalManager:
             + ", ".join(GOAL_KEYS)
             + ".",
             "",
-            "Infer reasonable values for any keys the user skipped, based on their stated goal.",
-            "Use null for fields that cannot be reasonably inferred.",
+            "Rules:",
+            "- primary_objective: a short phrase summarising their overall goal",
+            "- body_comp_goal: one of 'bulk', 'cut', or 'maintain'",
+            "- target_weight_kg: their goal weight in kg (number or null)",
+            "- weight_change_kg_per_month: positive for gain, negative for loss, 0 for maintain (number or null)",
+            "- gym_sessions_per_week: number of gym sessions (integer or null)",
+            "- runs_per_week: number of runs (integer or null)",
+            "- run_types: description of the types of runs they do (string or null)",
+            "- gym_description: description of their gym training structure (string or null)",
+            "- gym_goals: specific gym/strength goals (string or null)",
+            "- running_goals: specific running goals (string or null)",
+            "- Use null for fields that cannot be reasonably inferred.",
+            "- Do NOT infer workout counts or training frequencies — only use what the user explicitly stated.",
             "",
             "User responses:",
-            f"  Primary goal: {answers.get('primary_goal') or '(not provided)'}",
-            f"  Current weight (kg): {answers.get('current_weight') or '(not provided)'}",
-            f"  Target weight (kg): {answers.get('target_weight') or '(not provided)'}",
-            f"  Timeline (weeks): {answers.get('timeline_weeks') or '(not provided)'}",
-            f"  Workouts per week: {answers.get('workouts_per_week') or '(not provided)'}",
+            f"  Body comp goal: {answers.get('body_comp_goal') or '(not provided)'}",
+            f"  Goal weight (kg): {answers.get('target_weight') or '(not provided)'}",
+            f"  Weight change rate (kg/month): {answers.get('weight_rate') or '(not provided)'}",
             f"  Daily steps target: {answers.get('daily_steps') or '(not provided)'}",
             f"  Sleep hours target: {answers.get('sleep_hours') or '(not provided)'}",
+            f"  Gym sessions per week: {answers.get('gym_sessions') or '(not provided)'}",
+            f"  Runs per week: {answers.get('runs_per_week') or '(not provided)'}",
+            f"  Run types: {answers.get('run_types') or '(not provided)'}",
+            f"  Gym training description: {answers.get('gym_description') or '(not provided)'}",
+            f"  Gym goals: {answers.get('gym_goals') or '(not provided)'}",
+            f"  Running goals: {answers.get('running_goals') or '(not provided)'}",
             f"  Additional notes: {answers.get('notes') or '(none)'}",
         ]
         return "\n".join(lines)
