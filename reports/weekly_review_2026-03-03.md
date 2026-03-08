@@ -1,7 +1,7 @@
 # Weekly Fitness Review — March 03, 2026
 
 **Period:** 2026-02-25 → 2026-03-03  
-**Generated:** 2026-03-08 06:01  
+**Generated:** 2026-03-08 06:36  
 **Sources:** Garmin Connect · Hevy App · Claude (`claude-sonnet-4-6`)  
 
 ## Executive Summary
