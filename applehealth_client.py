@@ -17,9 +17,12 @@ Two import modes are supported (configure one in .env):
 Expected JSON format (array of entries):
     [
         {"date": "2026-03-01", "weight_kg": 82.5},
-        {"date": "2026-03-02", "weight_kg": 82.3},
+        {"date": "8 Mar 2026 at 7:20 am", "weight_kg": 82.3},
         ...
     ]
+
+Dates can be in ISO format (``YYYY-MM-DD``) or Apple Shortcuts default
+format (``8 Mar 2026 at 7:20 am``).  Both are normalised automatically.
 
 The iOS Shortcut to generate this is documented in the README.
 
@@ -31,9 +34,32 @@ Required environment variables (set ONE of these):
 import datetime
 import json
 import os
+import re
 from pathlib import Path
 
 import requests
+
+
+def _normalise_date(raw: str) -> str | None:
+    """Convert various date formats to YYYY-MM-DD.
+
+    Handles:
+      - "2026-03-01"              (already normalised)
+      - "8 Mar 2026 at 7:20 am"  (Apple Shortcuts default)
+      - "25 Dec 2025 at 2:06 am" (Apple Shortcuts default)
+    """
+    raw = raw.strip()
+    # Already in YYYY-MM-DD format
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
+        return raw
+    # Strip the " at HH:MM am/pm" suffix if present
+    cleaned = re.sub(r"\s+at\s+\d{1,2}:\d{2}\s*[ap]m", "", raw, flags=re.IGNORECASE)
+    for fmt in ("%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y"):
+        try:
+            return datetime.datetime.strptime(cleaned, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
 
 
 class AppleHealthClient:
@@ -71,7 +97,7 @@ class AppleHealthClient:
 
         entries = []
         for entry in raw_entries:
-            date_str = entry.get("date", "")
+            date_str = _normalise_date(entry.get("date", ""))
             weight = entry.get("weight_kg")
             if not date_str or weight is None:
                 continue
