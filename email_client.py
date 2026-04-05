@@ -74,19 +74,22 @@ class EmailClient:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _build_subject(self, period: str, end_date: str) -> str:
+    def _build_subject(self, cadence: str, end_date: str) -> str:
         """Return the formatted email subject line.
 
-        Weekly  → ``"Weekly Fitness Review — March 5, 2026"``
-        Monthly → ``"Monthly Fitness Review — March 2026"``
+        weekly          → "Weekly Fitness Digest — April 5, 2026"
+        block_checkin   → "Block Check-In — April 5, 2026"
+        end_of_programme → "End of Programme Review — April 5, 2026"
         """
         dt = datetime.strptime(end_date, "%Y-%m-%d")
-        if period.lower() == "weekly":
-            date_str = dt.strftime("%B %-d, %Y")  # e.g. "March 5, 2026"
-        else:
-            date_str = dt.strftime("%B %Y")  # e.g. "March 2026"
-        label = period.capitalize()
-        return f"{label} Fitness Review \u2014 {date_str}"
+        date_str = dt.strftime("%B %-d, %Y")
+        label_map = {
+            "weekly": "Weekly Fitness Digest",
+            "block_checkin": "Block Check-In",
+            "end_of_programme": "End of Programme Review",
+        }
+        label = label_map.get(cadence, cadence.replace("_", " ").title())
+        return f"{label} \u2014 {date_str}"
 
     def _markdown_to_html(self, md: str) -> str:
         """Convert Markdown to a complete, self-contained styled HTML document.

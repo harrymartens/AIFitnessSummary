@@ -1,399 +1,315 @@
-import json
+"""Claude AI integration for AIFitnessSummary.
+
+Generates structured natural language summaries — not data printouts.
+Interprets numbers in context of the training plan and goals,
+identifies patterns across metrics, flags risks, and issues
+concrete recommendations.
+
+Prompt architecture per proposal Section 6:
+- System prompt: training plan, block/week, goal, volume targets
+- User prompt: aggregated summary statistics only, never raw logs
+- Tone: direct, specific, brief — not motivational
+- Token budgets: 700-900 weekly, 1200-1500 block check-in
+"""
+
 import re
 
 import anthropic
 
-from config import MAX_TOKENS, MODEL
+from config import get_max_tokens, MODEL
 
-SYSTEM_PROMPT = """\
-You are an expert personal fitness coach and health analyst. You will be given \
-structured fitness and health data covering a specific review period. Your job is \
-to analyse the data and produce a clear, insightful, and actionable fitness review.
+# ---------------------------------------------------------------------------
+# System prompts per cadence (Section 6.1)
+# ---------------------------------------------------------------------------
 
-Write in a warm, motivating, but honest tone. Be specific — reference the actual \
-numbers from the data. Avoid generic advice; tailor every recommendation to what \
-the data shows.
+WEEKLY_SYSTEM_PROMPT = """\
+You are an expert concurrent-training coach analysing a weekly fitness digest. \
+You will receive aggregated summary statistics (never raw data) covering the past 7 days, \
+plus the athlete's training plan context.
 
-Structure your response with these exact Markdown headings (in this order):
-## Executive Summary
-## Activity & Cardiovascular Highlights
-## Sleep Quality
-## Recovery & Stress
-## Strength Training Analysis
-## Training Load Assessment
-## Recommendations for Next Period
+Be direct, specific, and brief. Do not be motivational. Reference actual numbers. \
+Every observation must connect to training adaptation or recovery.
 
-Keep the total response under 1200 words. Use bullet points where appropriate for \
-clarity. Do not repeat raw data tables — those appear separately in the report.
+Structure your response with these exact Markdown headings:
+## Overall Assessment
+One sentence: is this week on track or not, and why.
 
-GOAL-AWARE ANALYSIS:
-- The user's active fitness goal is provided in the [ACTIVE GOAL] section of the prompt.
-- Frame ALL observations relative to this goal. Every section should answer: "How does this metric relate to the goal?"
-- If a metric is on-track toward the goal, say so explicitly with the data to back it up.
-- If a metric is off-track, identify it clearly and connect it to goal impact.
-- If the goal is marked as "Provisional (AI-inferred)", note this and invite the user to confirm or update it via: python main.py goals
-- If no goal is provided, note that no goal is set and recommend running: python main.py goals
+## Sleep
+Quality and consistency signal. Flag bedtime SD, efficiency, or duration issues.
 
-RECOMMENDATIONS FORMAT:
-At the end of your response, after all narrative sections, output a structured block in this exact format:
+## Strength
+Volume adequacy per muscle group vs targets. Progressive overload status. Session adherence.
 
----RECOMMENDATIONS---
-[HIGH] category: text of recommendation
-[MEDIUM] category: text of recommendation
-[LOW] category: text of recommendation
----END RECOMMENDATIONS---
+## Running
+Volume compliance vs plan. Intensity distribution (easy/hard %). Quality session fidelity if data present.
 
-- Include 3–5 recommendations total
-- Priority: HIGH, MEDIUM, or LOW
-- Category must be one of: sleep, training, recovery, cardiovascular, nutrition, general
-- Text should be specific and actionable, referencing actual numbers from the data
-- This block must appear AFTER the narrative sections so it does not disrupt the report flow
+## Recovery
+RHR trend and HRV status. Flag if either indicates accumulated fatigue.
 
-EVIDENCE-BASED GUIDANCE:
-- If a [KNOWLEDGE BASE] section is provided, draw on it to support your recommendations.
-- If a [RESEARCH CONTEXT] section is provided, cite the specific source by name (e.g. "According to [Source Name]...").
-- Distinguish evidence-based claims from general coaching guidance.
-- Do not fabricate citations. Only cite sources that appear in the provided context blocks.\
+## Nutrition
+Protein adequacy, calorie adherence, bodyweight trend direction.
+
+## Action Item
+One single concrete recommendation for the coming week. Be specific.
+
+ESCALATION FLAGS:
+If escalation flags are provided in the data, incorporate them into the relevant section \
+with advisory language. These are pre-computed threshold breaches that require explicit mention.
+
+Keep total response under 800 words. Do not repeat raw numbers as tables. \
+Do not output a recommendations block — the action item section IS the recommendation.\
+"""
+
+BLOCK_CHECKIN_SYSTEM_PROMPT = """\
+You are an expert concurrent-training coach conducting a block check-in during a deload week. \
+You will receive aggregated metrics for this week plus block-level context.
+
+Be direct, specific, and brief. Do not be motivational. Reference actual numbers.
+
+Structure your response with these exact Markdown headings:
+## Block Assessment
+Was this block effective for its stated goal (hypertrophy or strength)?
+
+## Strength Adaptation
+Load and hypertrophy adaptation review. Estimated 1RM changes on primary lifts. \
+Volume progression per muscle group across the block. Stalled exercises.
+
+## Running Adaptation
+Is pace-at-threshold-HR improving? Quality session pace trend. \
+Weekly km progression. VO2max direction (supporting evidence only).
+
+## Body Composition
+Is the gain/loss rate appropriate for the block goal? Weight trend vs target rate.
+
+## Concurrent Interference
+Was interference detected? Lower body strength in high-mileage weeks. \
+Intensity distribution. RHR + volume correlation.
+
+## Recovery Health
+RHR trend across the block. Training Status label. Was load appropriate?
+
+## Programme Recommendation
+Specific changes for the next block. Options: continue / adjust load / \
+modify exercise selection / adjust run-lift sequencing / extend deload.
+
+Keep total response under 1400 words.\
+"""
+
+END_OF_PROGRAMME_SYSTEM_PROMPT = """\
+You are an expert concurrent-training coach conducting an end-of-programme review. \
+You will receive aggregated metrics for the final week plus full-programme context.
+
+Be direct, specific, and brief. Do not be motivational. Reference actual numbers.
+
+Structure your response with these exact Markdown headings:
+## Goal Achievement
+Were the programme targets met? Strength numbers, running performance, body composition.
+
+## Biggest Adaptation Wins
+What improved most and why. Cite specific metric changes.
+
+## Gaps
+What did not improve or regressed. Identify root causes.
+
+## Structural Carry-Forward
+What programme elements worked well and should be maintained.
+
+## Next Block Recommendation
+Recommended structure: which qualities to prioritise, which are well-developed, \
+what to load-manage. Suggest specific block type and focus.
+
+Keep total response under 1400 words.\
 """
 
 
-def _format_goal_for_prompt(goal: dict) -> str:
-    """Format a goal dict into a prompt block."""
-    lines = ["[ACTIVE GOAL]"]
-    lines.append(f"Goal: {goal.get('goal_type', 'Unknown')}")
-    if goal.get("description"):
-        lines.append(f"Description: {goal['description']}")
-    if goal.get("target_date"):
-        lines.append(f"Target date: {goal['target_date']}")
-    if goal.get("provisional"):
-        lines.append("Status: Provisional (AI-inferred)")
-    else:
-        lines.append("Status: Confirmed")
+def _get_system_prompt(cadence: str) -> str:
+    """Return the appropriate system prompt for the cadence type."""
+    if cadence == "block_checkin":
+        return BLOCK_CHECKIN_SYSTEM_PROMPT
+    if cadence == "end_of_programme":
+        return END_OF_PROGRAMME_SYSTEM_PROMPT
+    return WEEKLY_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Data formatting for prompts
+# ---------------------------------------------------------------------------
+
+def _format_plan_context(plan_context: str) -> str:
+    """Format plan context block for the prompt."""
+    if not plan_context:
+        return "[TRAINING PLAN]\nNo training plan loaded."
+    return plan_context
+
+
+def _format_escalation_flags(flags: list[dict]) -> str:
+    """Format escalation flags for the prompt."""
+    if not flags:
+        return ""
+    lines = ["[ESCALATION FLAGS — MUST BE ADDRESSED IN RELEVANT SECTIONS]"]
+    for flag in flags:
+        lines.append(f"- {flag['condition']} → {flag['advisory']}")
     return "\n".join(lines)
 
 
-def _format_data_for_prompt(
-    period: str,
-    start_date: str,
-    end_date: str,
-    garmin: dict,
-    hevy: dict,
-    goal=None,
-    trend_context=None,
-    active_recommendations=None,
-    knowledge_context=None,
-) -> str:
+def _format_weekly_data(summary: dict) -> str:
+    """Format aggregated weekly summary statistics for the user prompt."""
     lines = []
 
-    # 1. Goal block (if available)
-    if goal:
-        try:
-            from goal_manager import format_goal_for_prompt as _ext_fmt
-            lines.append(_ext_fmt(goal))
-        except Exception:
-            lines.append(_format_goal_for_prompt(goal))
-        lines.append("")
-    else:
-        lines.append("[ACTIVE GOAL]\nNo active goal set. Run: python main.py goals")
-        lines.append("")
+    # Sleep
+    lines.append("=== SLEEP ===")
+    lines.append(f"Average duration: {summary.get('sleep_avg_duration_h')} hours")
+    lines.append(f"Bedtime consistency (SD): {summary.get('sleep_bedtime_consistency_sd_min')} minutes")
+    lines.append(f"Sleep efficiency: {summary.get('sleep_efficiency_pct')}%")
+    lines.append(f"Sleep respiratory rate: {summary.get('sleep_respiration_brpm')} brpm")
+    lines.append(f"Overnight RHR: {summary.get('overnight_rhr_avg_bpm')} bpm")
+    lines.append(f"Nights tracked: {summary.get('sleep_nights_tracked')}")
 
-    # 2. Historical trend context (if available)
-    if trend_context:
-        lines.append(trend_context)
-        lines.append("")
+    # Strength
+    lines.append("")
+    lines.append("=== STRENGTH ===")
+    completed = summary.get('strength_sessions_completed', 0)
+    planned = summary.get('strength_sessions_planned')
+    adherence = summary.get('strength_session_adherence_pct')
+    lines.append(f"Sessions completed: {completed}" + (f" / {planned} planned ({adherence}%)" if planned else ""))
 
-    # 3. Previous recommendations (if available)
-    if active_recommendations:
-        lines.append("[PREVIOUS RECOMMENDATIONS — PLEASE ASSESS EACH]")
-        for rec in active_recommendations:
-            priority_label = {1: "HIGH", 2: "MEDIUM", 3: "LOW"}.get(rec.get("priority", 2), "MEDIUM")
-            lines.append(f"[{priority_label}] [{rec.get('category', 'general').upper()}] {rec.get('text', '')}")
-        lines.append("For each recommendation above, assess: CONTINUED | ESCALATED | RESOLVED")
-        lines.append("Include your assessment in the Recommendations section of your response.")
-        lines.append("")
+    sets_per_group = summary.get("sets_per_muscle_group", {})
+    volume_targets = summary.get("volume_targets", {})
+    if sets_per_group:
+        lines.append("Sets per muscle group (vs target range):")
+        for group, sets in sets_per_group.items():
+            target = volume_targets.get(group, {})
+            if target:
+                lines.append(f"  {group}: {sets} sets (target {target.get('min')}-{target.get('max')})")
+            else:
+                lines.append(f"  {group}: {sets} sets")
 
-    # 4. Knowledge context (if available)
-    if knowledge_context:
-        lines.append(knowledge_context)
-        lines.append("")
+    top_sets = summary.get("primary_lift_top_sets", {})
+    if top_sets:
+        lines.append("Primary compound lift top sets:")
+        for lift, data in top_sets.items():
+            lines.append(f"  {lift}: {data['weight_kg']}kg x {data['reps']} (est. 1RM: {data['estimated_1rm']}kg)")
 
-    # Existing period + Garmin + Hevy content
-    lines += [
-        f"REVIEW PERIOD: {period.upper()} ({start_date} to {end_date})",
-        "",
-        "=== GARMIN HEALTH DATA ===",
-        "",
-        "-- Activity --",
-        f"Average daily steps: {garmin['stats'].get('avg_daily_steps')}",
-        f"Average daily distance: {garmin['stats'].get('avg_distance_km')} km",
-        f"Average daily active minutes: {garmin['stats'].get('avg_active_minutes')}",
-        f"Average intensity minutes: {garmin['stats'].get('avg_intensity_minutes')}",
-        f"Average floors climbed/day: {garmin['stats'].get('avg_floors')}",
-        f"Average total calories/day: {garmin['stats'].get('avg_total_calories')} kcal",
-        "",
-        "-- Cardiovascular --",
-        f"Average resting heart rate: {garmin['heart_rate'].get('avg_resting_hr')} bpm",
-        "Daily resting HR trend (date: bpm):",
-    ]
-    for entry in garmin["heart_rate"].get("daily_trend", []):
-        lines.append(f"  {entry['date']}: {entry['resting_hr']} bpm")
+    # Running
+    lines.append("")
+    lines.append("=== RUNNING ===")
+    total_km = summary.get('running_total_km', 0)
+    planned_km = summary.get('running_planned_km')
+    compliance = summary.get('running_volume_compliance_pct')
+    lines.append(f"Total volume: {total_km} km" + (f" / {planned_km} km planned ({compliance}%)" if planned_km else ""))
+    lines.append(f"Intensity: {summary.get('running_easy_pct')}% easy / {summary.get('running_hard_pct')}% hard")
+    lines.append(f"Easy km: {summary.get('running_easy_km')} | Hard km: {summary.get('running_hard_km')}")
+    lines.append(f"Runs completed: {summary.get('run_count', 0)}" + (f" / {summary.get('runs_planned')} planned" if summary.get('runs_planned') else ""))
 
-    lines += [
-        "",
-        "-- HRV --",
-        f"Period average HRV: {garmin['hrv'].get('period_avg_ms')} ms",
-        "Daily HRV status:",
-    ]
-    for entry in garmin["hrv"].get("daily", []):
-        lines.append(f"  {entry['date']}: {entry.get('status', 'n/a')} (last night avg: {entry.get('last_night_avg_ms')} ms)")
+    # Recovery
+    lines.append("")
+    lines.append("=== RECOVERY ===")
+    lines.append(f"7-day avg resting HR: {summary.get('resting_hr_avg_bpm')} bpm")
+    lines.append(f"HRV 7-day status: {summary.get('hrv_status_label')}")
 
-    spo2 = garmin.get("spo2", {})
-    resp = garmin.get("respiration", {})
-    vo2 = garmin.get("vo2max", {})
-    lines += [
-        "",
-        "-- Blood Oxygen & Respiration --",
-        f"Average SpO2: {spo2.get('avg_spo2')} %",
-        f"Average lowest nightly SpO2: {spo2.get('avg_lowest_spo2')} %",
-        f"Average waking respiration rate: {resp.get('avg_waking_brpm')} brpm",
-        f"Average sleep respiration rate: {resp.get('avg_sleep_brpm')} brpm",
-        "",
-        "-- VO2 Max, Fitness Age & Performance --",
-        f"VO2 max: {vo2.get('vo2_max')} ml/kg/min",
-    ]
-
-    fa = garmin.get("fitness_age", {})
-    lt = garmin.get("lactate_threshold", {})
-    es = garmin.get("endurance_score", {})
-    rp = garmin.get("race_predictions", {})
-    lines += [
-        f"Fitness age: {fa.get('fitness_age')} yrs (chronological: {fa.get('chronological_age')}, achievable: {fa.get('achievable_fitness_age')})",
-        f"Endurance score: {es.get('score')} ({es.get('classification')})",
-        f"Lactate threshold HR: {lt.get('lt_heart_rate')} bpm | Running FTP: {lt.get('ftp_watts')} W",
-    ]
-    if any(rp.get(k) for k in ("time_5k", "time_10k", "time_half", "time_marathon")):
-        lines += [
-            "Predicted race times:",
-            f"  5K: {rp.get('time_5k')} | 10K: {rp.get('time_10k')} | Half: {rp.get('time_half')} | Marathon: {rp.get('time_marathon')}",
-        ]
-    lines += [
-        "",
-        "-- Sleep --",
-        f"Average total sleep: {garmin['sleep'].get('avg_total_h')} h",
-        f"Average deep sleep: {garmin['sleep'].get('avg_deep_h')} h",
-        f"Average REM sleep: {garmin['sleep'].get('avg_rem_h')} h",
-        f"Average light sleep: {garmin['sleep'].get('avg_light_h')} h",
-        f"Average awake time: {garmin['sleep'].get('avg_awake_h')} h",
-        f"Nights tracked: {len(garmin['sleep'].get('nightly', []))}",
-        "Nightly breakdown:",
-    ]
-    for night in garmin["sleep"].get("nightly", []):
-        lines.append(
-            f"  {night['date']}: total {night['total_h']}h | deep {night['deep_h']}h | "
-            f"REM {night['rem_h']}h | light {night['light_h']}h | awake {night['awake_h']}h"
-        )
-
-    readiness = garmin.get("training_readiness", {})
-    mr = garmin.get("morning_readiness", {})
-    sweat = garmin.get("sweat_loss", {})
-    lines += [
-        "",
-        "-- Stress, Recovery & Body Battery --",
-        f"Average stress level: {garmin['stress'].get('avg_stress')} (0–100 scale)",
-        "Daily stress (date: score):",
-    ]
-    for entry in garmin["stress"].get("daily", []):
-        lines.append(f"  {entry['date']}: {entry['avg_stress']}")
-    lines += [
-        f"Average body battery max (charged): {garmin['body_battery'].get('avg_max')}",
-        f"Average body battery drain: {garmin['body_battery'].get('avg_min')}",
-        f"Average morning readiness score: {mr.get('avg_score') or readiness.get('avg_score')} / 100",
-        f"Latest morning readiness: {mr.get('latest_score') or readiness.get('latest_score')} ({mr.get('latest_level') or readiness.get('latest_level')})",
-        f"Average daily sweat loss: {sweat.get('avg_sweat_loss_ml')} mL",
-        "Morning readiness detail (date: score / level / sleep-score / recovery-h / HRV-factor%):",
-    ]
-    for d in mr.get("daily", []):
-        lines.append(
-            f"  {d['date']}: {d.get('score')} / {d.get('level')} | "
-            f"sleep {d.get('sleep_score')} | recovery {d.get('recovery_time_h')}h | "
-            f"HRV factor {d.get('hrv_factor_pct')}%"
-        )
-
-    tl = garmin["training_load"]
-    lines += [
-        "",
-        "-- Training Load --",
-        f"Training status: {tl.get('status_phrase')}",
-        f"Acute load: {tl.get('acute_load')} | Chronic load: {tl.get('chronic_load')}",
-        f"ACWR ratio: {tl.get('acwr_ratio')} ({tl.get('acwr_status')} — 0.8–1.3 is optimal)",
-        f"Load balance: {tl.get('balance_phrase')}",
-        f"Monthly aerobic-low: {tl.get('aerobic_low')} | aerobic-high: {tl.get('aerobic_high')} | anaerobic: {tl.get('anaerobic')}",
-    ]
-
-    weekly = garmin.get("weekly_intensity", {})
-    if weekly.get("weeks"):
-        lines.append("Weekly intensity minutes (moderate / vigorous / total-equiv / goal / met?):")
-        for w in weekly["weeks"]:
-            lines.append(
-                f"  {w['week_start']}: {w['moderate_min']}min mod + {w['vigorous_min']}min vig"
-                f" = {w['total_equivalent_min']}min equiv vs {w['goal_min']}min goal"
-                f" ({'MET' if w['met_goal'] else 'NOT MET'})"
-            )
-
-    hs = garmin.get("hill_score", {})
-    if hs.get("overall_score") is not None:
-        lines.append(
-            f"Hill score: {hs['overall_score']} overall "
-            f"(strength {hs.get('strength_score')}, endurance {hs.get('endurance_score')})"
-        )
-
-    body = garmin.get("body_composition", {})
-    if body.get("latest_weight_kg"):
-        lines += [
-            "",
-            "-- Body Composition --",
-            f"Latest weight: {body.get('latest_weight_kg')} kg",
-            f"Average weight: {body.get('avg_weight_kg')} kg",
-            f"Latest BMI: {body.get('latest_bmi')}",
-            f"Latest body fat: {body.get('latest_body_fat_pct')} %",
-        ]
-
-    runs = garmin.get("runs", {})
-    if runs.get("run_count"):
-        lines += [
-            "",
-            "-- Running --",
-            f"Runs completed: {runs['run_count']}",
-            f"Total distance: {runs['total_distance_km']} km",
-            f"Average pace: {runs.get('avg_pace_min_km')} min/km",
-            "Individual runs (date: distance, pace, avg HR, cadence, power, GCT):",
-        ]
-        for r in runs.get("runs", []):
-            dyn = r.get("running_dynamics", {})
-            zones = r.get("hr_zones", {})
-            run_line = (
-                f"  {r['date']}: {r['distance_km']} km @ {r.get('avg_pace_min_km')} min/km"
-                + (f", HR {r['avg_hr']} bpm" if r.get("avg_hr") else "")
-                + (f", cadence {dyn['avg_cadence_spm']} spm" if dyn.get("avg_cadence_spm") else "")
-                + (f", power {dyn['avg_power_w']} W" if dyn.get("avg_power_w") else "")
-                + (f", GCT {dyn['avg_ground_contact_ms']} ms" if dyn.get("avg_ground_contact_ms") else "")
-            )
-            lines.append(run_line)
-            if zones:
-                z1 = zones.get("zone1_pct", 0)
-                z2 = zones.get("zone2_pct", 0)
-                z3 = zones.get("zone3_pct", 0)
-                z4 = zones.get("zone4_pct", 0)
-                z5 = zones.get("zone5_pct", 0)
-                lines.append(
-                    f"    HR zones: Z1 {z1}% | Z2 {z2}% | Z3 {z3}% | Z4 {z4}% | Z5 {z5}%"
-                )
-
-    lines += [
-        "",
-        "=== HEVY STRENGTH TRAINING DATA ===",
-        "",
-        f"Workouts completed: {hevy.get('workout_count')}",
-        f"Workouts per week: {hevy.get('workouts_per_week')}",
-        f"Training dates: {', '.join(hevy.get('workout_dates', []))}",
-        "",
-        "Volume by muscle group (kg × reps):",
-    ]
-    for muscle, vol in hevy.get("volume_by_muscle_group", {}).items():
-        lines.append(f"  {muscle}: {vol}")
-
-    if hevy.get("personal_records"):
-        lines.append("")
-        lines.append("Personal records set this period:")
-        for pr in hevy["personal_records"]:
-            lines.append(f"  {pr['exercise']}: {pr['weight_kg']} kg × {pr['reps']} reps")
-
-    lines += [
-        "",
-        "Exercise breakdown (sets / max weight):",
-    ]
-    for name, ex in hevy.get("exercises", {}).items():
-        lines.append(
-            f"  {name} [{ex['muscle_group']}]: {ex['total_sets']} sets, "
-            f"{ex['total_reps']} reps, max {ex['max_weight_kg']} kg"
-        )
+    # Nutrition
+    lines.append("")
+    lines.append("=== NUTRITION ===")
+    lines.append(f"Avg daily protein: {summary.get('nutrition_avg_protein_g')} g")
+    lines.append(f"Avg daily calories: {summary.get('nutrition_avg_calories')}")
+    lines.append(f"7-day avg bodyweight: {summary.get('bodyweight_avg_kg')} kg")
 
     return "\n".join(lines)
 
 
+def _format_block_data(summary: dict) -> str:
+    """Format aggregated block check-in data for the user prompt."""
+    weekly = _format_weekly_data(summary)
+
+    lines = [weekly]
+    lines.append("")
+    lines.append("=== BLOCK-LEVEL METRICS ===")
+    lines.append(f"Training Status: {summary.get('training_status_label')}")
+    lines.append(f"VO2max estimate: {summary.get('vo2max_estimate')}")
+
+    return "\n".join(lines)
+
+
+def format_data_for_prompt(
+    cadence: str,
+    start_date: str,
+    end_date: str,
+    summary: dict,
+    plan_context: str = "",
+    escalation_flags: list[dict] | None = None,
+) -> str:
+    """Assemble the complete user prompt from aggregated data.
+
+    Only passes summary statistics — never raw daily data, GPS tracks,
+    HR samples, food logs, or individual sets.
+    """
+    lines = []
+
+    # Plan context (always first)
+    lines.append(_format_plan_context(plan_context))
+    lines.append("")
+
+    # Escalation flags
+    if escalation_flags:
+        lines.append(_format_escalation_flags(escalation_flags))
+        lines.append("")
+
+    # Period header
+    lines.append(f"REVIEW PERIOD: {cadence.upper().replace('_', ' ')} ({start_date} to {end_date})")
+    lines.append("")
+
+    # Aggregated data
+    if cadence in ("block_checkin", "end_of_programme"):
+        lines.append(_format_block_data(summary))
+    else:
+        lines.append(_format_weekly_data(summary))
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Claude API client
+# ---------------------------------------------------------------------------
+
 class ClaudeAnalyzer:
-    """Uses the Anthropic API to generate a narrative fitness review."""
+    """Uses the Anthropic API to generate fitness digest summaries."""
 
     def __init__(self):
-        self._client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+        self._client = anthropic.Anthropic()
 
     def generate_review(
         self,
-        period: str,
+        cadence: str,
         start_date: str,
         end_date: str,
-        garmin_data: dict,
-        hevy_summary: dict,
-        goal: dict | None = None,
-        trend_context: str | None = None,
-        active_recommendations: list | None = None,
-        knowledge_context: str | None = None,
+        summary: dict,
+        plan_context: str = "",
+        escalation_flags: list[dict] | None = None,
     ) -> str:
-        user_content = _format_data_for_prompt(
-            period,
-            start_date,
-            end_date,
-            garmin_data,
-            hevy_summary,
-            goal=goal,
-            trend_context=trend_context,
-            active_recommendations=active_recommendations,
-            knowledge_context=knowledge_context,
+        """Generate the AI summary for the given cadence.
+
+        Args:
+            cadence: 'weekly', 'block_checkin', or 'end_of_programme'
+            start_date: ISO date string
+            end_date: ISO date string
+            summary: aggregated metrics from aggregator.py
+            plan_context: formatted plan context from plan_client
+            escalation_flags: list of flag dicts from aggregator.detect_escalation_flags
+        """
+        system_prompt = _get_system_prompt(cadence)
+        user_content = format_data_for_prompt(
+            cadence, start_date, end_date, summary,
+            plan_context=plan_context,
+            escalation_flags=escalation_flags,
         )
 
-        print("Generating Claude analysis…")
+        max_tokens = get_max_tokens(cadence)
+
+        print(f"Generating Claude {cadence} analysis...")
         response = self._client.messages.create(
             model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
+            max_tokens=max_tokens,
+            system=system_prompt,
             messages=[{"role": "user", "content": user_content}],
         )
         return response.content[0].text
-
-    @staticmethod
-    def parse_recommendations(response: str) -> list[dict]:
-        """
-        Extract structured recommendations from Claude's response.
-        Returns list of dicts: {"priority": int, "category": str, "text": str}
-        Priority: HIGH=1, MEDIUM=2, LOW=3
-        Returns [] if no recommendations block found.
-        """
-        pattern = r'---RECOMMENDATIONS---(.*?)---END RECOMMENDATIONS---'
-        match = re.search(pattern, response, re.DOTALL)
-        if not match:
-            return []
-
-        block = match.group(1).strip()
-        recommendations = []
-        priority_map = {"HIGH": 1, "MEDIUM": 2, "LOW": 3}
-
-        for line in block.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            # Match: [HIGH] category: text
-            m = re.match(r'\[(HIGH|MEDIUM|LOW)\]\s+(\w+):\s+(.+)', line)
-            if m:
-                recommendations.append({
-                    "priority": priority_map.get(m.group(1), 2),
-                    "category": m.group(2).lower(),
-                    "text": m.group(3).strip()
-                })
-
-        return recommendations
-
-    @staticmethod
-    def strip_recommendations_block(response: str) -> str:
-        """Remove the ---RECOMMENDATIONS--- block from response before saving to report."""
-        return re.sub(r'\n*---RECOMMENDATIONS---.*?---END RECOMMENDATIONS---\n*',
-                      '', response, flags=re.DOTALL).strip()

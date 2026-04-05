@@ -129,28 +129,29 @@ class TestSubjectLine(unittest.TestCase):
 
     def test_weekly_subject_format(self):
         subject = self.client._build_subject("weekly", "2026-03-05")
-        # Should be "Weekly Fitness Review — March 5, 2026"
-        self.assertIn("Weekly Fitness Review", subject)
+        self.assertIn("Weekly Fitness Digest", subject)
         self.assertIn("March", subject)
         self.assertIn("2026", subject)
         self.assertIn("\u2014", subject)  # em dash
 
-    def test_monthly_subject_format(self):
-        subject = self.client._build_subject("monthly", "2026-03-31")
-        # Should be "Monthly Fitness Review — March 2026"
-        self.assertIn("Monthly Fitness Review", subject)
-        self.assertIn("March 2026", subject)
-        # Day number should NOT appear for monthly
-        self.assertNotIn("31", subject)
+    def test_block_checkin_subject_format(self):
+        subject = self.client._build_subject("block_checkin", "2026-03-31")
+        self.assertIn("Block Check-In", subject)
+        self.assertIn("March", subject)
+        self.assertIn("2026", subject)
+
+    def test_end_of_programme_subject_format(self):
+        subject = self.client._build_subject("end_of_programme", "2026-06-30")
+        self.assertIn("End of Programme Review", subject)
+        self.assertIn("June", subject)
 
     def test_weekly_subject_does_not_contain_only_year(self):
         subject = self.client._build_subject("weekly", "2026-01-01")
-        # January 1, 2026 — day should be present
         self.assertIn("January", subject)
 
-    def test_monthly_capitalised(self):
-        subject = self.client._build_subject("monthly", "2026-06-30")
-        self.assertTrue(subject.startswith("Monthly"))
+    def test_block_checkin_capitalised(self):
+        subject = self.client._build_subject("block_checkin", "2026-06-30")
+        self.assertTrue(subject.startswith("Block"))
 
     def test_weekly_capitalised(self):
         subject = self.client._build_subject("weekly", "2026-06-30")
@@ -266,7 +267,7 @@ class TestSendReport(unittest.TestCase):
         # Decode RFC-2047-encoded header words
         from email.header import decode_header, make_header
         subject = str(make_header(decode_header(parsed["Subject"])))
-        self.assertIn("Weekly Fitness Review", subject)
+        self.assertIn("Weekly Fitness Digest", subject)
 
 
 # ---------------------------------------------------------------------------
